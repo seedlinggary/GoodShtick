@@ -34,5 +34,5 @@ def login():
 
 if(__name__) == '__main__':
     # app.run()
-
-    application.run(debug=True)
+    application.run(host='0.0.0.0')
+    application.run(debug=False)
