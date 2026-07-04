@@ -1,53 +1,93 @@
-from backend.user.modals.user import User
-from backend.shtick.modals.shtick import Shtick
-from backend.shtick.modals.generalc import Generalc
-from backend.shtick.modals.picture import Picture
-from backend.shtick.modals.url import Url
-from backend.shtick.modals.content import Content
-from backend.shtick.modals.like import Like
-from config import ma
+from marshmallow import Schema, fields
 
-class UserSchema(ma.Schema):
-    class Meta:
-        model = User
-        fields = ('public_id','profile_name', 'email')
 
-class LikeSchema(ma.Schema):
-    class Meta:
-        model = Like
-        fields = ('id','pub_date','shtick_id','user_id', 'user')
-    user = ma.Nested(UserSchema)
-class GeneralcSchema(ma.Schema):
-    class Meta:
-        model = Generalc
-        fields = ('id','name')
+class UserPublicSchema(Schema):
+    public_id = fields.Str()
+    profile_name = fields.Str()
+    role = fields.Str()
 
-                # include_fk = True
-class PictureSchema(ma.Schema):
-    class Meta:
-        model = Picture
-        fields = ('id','name')
-                # include_fk = True
-class UrlSchema(ma.Schema):
-    class Meta:
-        model = Url
-        fields = ('id','name')
-                # include_fk = True
-class ContentSchema(ma.Schema):
-    class Meta:
-        model = Content
-        fields = ('id','stuff')
-                # include_fk = True
-class ShtickSchema(ma.Schema):
-    class Meta:
-        model = Shtick
-        fields = ('id','pub_date','caption','credit','approved_to_publish','specific_category','user_id','user','generalc_id','generalc','content', 'picture', 'url','likes')
-                # include_fk = True
-    user = ma.Nested(UserSchema)
-    generalc = ma.Nested(GeneralcSchema)
-    content = ma.Nested(ContentSchema)
-    picture = ma.Nested(PictureSchema)
-    url = ma.Nested(UrlSchema)
-    likes = ma.Nested(LikeSchema, many=True)
+
+class GeneralcSchema(Schema):
+    id = fields.Int()
+    name = fields.Str()
+
+
+class PictureSchema(Schema):
+    id = fields.Int()
+    name = fields.Str()
+
+
+class UrlSchema(Schema):
+    id = fields.Int()
+    name = fields.Str()
+
+
+class ContentSchema(Schema):
+    id = fields.Int()
+    stuff = fields.Str()
+
+
+class CommentSchema(Schema):
+    id = fields.Int()
+    text = fields.Str()
+    pub_date = fields.DateTime()
+    user_id = fields.Str()
+    user = fields.Nested(UserPublicSchema)
+
+
+class LikeSchema(Schema):
+    id = fields.Int()
+    pub_date = fields.DateTime()
+    shtick_id = fields.Int()
+    user_id = fields.Str()
+
+
+class ShtickSchema(Schema):
+    """Full schema — used in admin views where comments are needed."""
+    id = fields.Int()
+    pub_date = fields.DateTime()
+    caption = fields.Str()
+    credit = fields.Str()
+    approved_to_publish = fields.Bool()
+    view_count = fields.Int()
+    specific_category = fields.Str()
+    user_id = fields.Str()
+    approved_by = fields.Str()
+    user = fields.Nested(UserPublicSchema)
+    approver = fields.Nested(UserPublicSchema)
+    generalc_id = fields.Int()
+    generalc = fields.Nested(GeneralcSchema)
+    categories = fields.Nested(GeneralcSchema, many=True)
+    content = fields.Nested(ContentSchema)
+    picture = fields.Nested(PictureSchema)
+    url = fields.Nested(UrlSchema)
+    likes = fields.Nested(LikeSchema, many=True)
+    comments = fields.Nested(CommentSchema, many=True)
+
+
+class ShtickFeedSchema(Schema):
+    """Lean schema for the public feed — omits comments (loaded on-demand by Comments.js)."""
+    id = fields.Int()
+    pub_date = fields.DateTime()
+    caption = fields.Str()
+    credit = fields.Str()
+    approved_to_publish = fields.Bool()
+    view_count = fields.Int()
+    specific_category = fields.Str()
+    user_id = fields.Str()
+    user = fields.Nested(UserPublicSchema)
+    generalc_id = fields.Int()
+    generalc = fields.Nested(GeneralcSchema)
+    categories = fields.Nested(GeneralcSchema, many=True)
+    content = fields.Nested(ContentSchema)
+    picture = fields.Nested(PictureSchema)
+    url = fields.Nested(UrlSchema)
+    likes = fields.Nested(LikeSchema, many=True)
+
+
 shtick_schema = ShtickSchema()
 shticks_schema = ShtickSchema(many=True)
+shtick_feed_schema = ShtickFeedSchema()
+shticks_feed_schema = ShtickFeedSchema(many=True)
+comment_schema = CommentSchema()
+comments_schema = CommentSchema(many=True)

@@ -1,19 +1,17 @@
-from backend.shtick.modals.like import Like
-from backend.user.modals.user import User
+from marshmallow import Schema, fields
 
-from config import ma
 
-class UserSchema(ma.Schema):
-    class Meta:
-        model = User
-        fields = ('public_id','email')
+class UserSchema(Schema):
+    public_id = fields.Str()
+    email = fields.Str()
 
-class LikeSchema(ma.Schema):
-    class Meta:
-        model = Like
-        fields = ('id','pub_date','shtick_id','user_id','user')
-                # include_fk = True
-    user = ma.Nested(UserSchema)
+
+class LikeSchema(Schema):
+    id = fields.Int()
+    pub_date = fields.DateTime()
+    shtick_id = fields.Int()
+    user_id = fields.Str()
+    user = fields.Nested(UserSchema)
 
 like_schema = LikeSchema()
 likes_schema = LikeSchema(many=True)

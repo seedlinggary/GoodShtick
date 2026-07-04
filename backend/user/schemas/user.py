@@ -1,12 +1,24 @@
-from backend.user.modals.user import User
-from config import ma
+from marshmallow import Schema, fields
 
 
+class UserSchema(Schema):
+    public_id = fields.Str()
+    first_name = fields.Str()
+    last_name = fields.Str()
+    email = fields.Str()
+    profile_name = fields.Str()
+    role = fields.Str()
+    pub_date = fields.DateTime()
+    last_login = fields.DateTime()
 
-class UserSchema(ma.Schema):
-    class Meta:
-        model = User
-        fields = ('public_id', 'first_name', 'last_name', 'email', 'profile_name')
-                # include_fk = True
+
+class UserPublicSchema(Schema):
+    public_id = fields.Str()
+    profile_name = fields.Str()
+    role = fields.Str()
+
+
 user_schema = UserSchema()
 users_schema = UserSchema(many=True)
+user_public_schema = UserPublicSchema()
+users_public_schema = UserPublicSchema(many=True)

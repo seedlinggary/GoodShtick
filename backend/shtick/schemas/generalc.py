@@ -1,12 +1,9 @@
-from backend.shtick.modals.generalc import Generalc
-from config import ma
+from marshmallow import Schema, fields
 
 
+class GeneralcSchema(Schema):
+    id = fields.Int()
+    name = fields.Str()
 
-class GeneralcSchema(ma.Schema):
-    class Meta:
-        model = Generalc
-        fields = ('id','name')
-                # include_fk = True
 generalc_schema = GeneralcSchema()
 generalcs_schema = GeneralcSchema(many=True)
