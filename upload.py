@@ -3,7 +3,7 @@ from werkzeug.utils import secure_filename
 import os
 import uuid
 import shutil
-from config import  application
+
 # from storage3 import create_client
 from supabase import create_client, Client
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'xlsx', 'xlsb', 'csv'}
@@ -25,18 +25,16 @@ def allowed_file(filename):
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+DOWNLOAD_DIR = '/tmp/downloadimages'
+
 def download_images(images_list):
-    print(images_list)
     my_bucket = _get_supabase().storage.list_buckets()
-    if os.path.exists('downloadimages'):
-        shutil.rmtree('downloadimages')
-    os.makedirs('downloadimages')
+    if os.path.exists(DOWNLOAD_DIR):
+        shutil.rmtree(DOWNLOAD_DIR)
+    os.makedirs(DOWNLOAD_DIR)
     for name in images_list:
-        name_of_file = name +'.jpeg'
-        print(name)
-        # completeName = os.path.join('downloadimages', name_of_file)
-        with open(os.path.join('downloadimages',name_of_file), 'wb+') as f:
-            # for name in images_list:
+        name_of_file = name + '.jpeg'
+        with open(os.path.join(DOWNLOAD_DIR, name_of_file), 'wb+') as f:
             res = my_bucket[0].download(name)
             f.write(res)
             # completeName = os.path.join('downloadimages', name_of_file)
@@ -55,20 +53,13 @@ def upload_file(request):
             flash('No selected file')
             return None
         if file and allowed_file(file.filename):
-
             filename = secure_filename(file.filename)
-            # workbook = Workbook(request.files['data_file'])
-            # filename = 'investor_accounting.csv'
-            # print((file.content_type))
+            tmp_path = os.path.join('/tmp', filename)
             res = _get_supabase().storage.list_buckets()
-            print(res)
-            fname =str(uuid.uuid4())
-            file.save(os.path.join(application.config['UPLOAD_FOLDER'], filename))
-            # open(f'uploadedFiles/{filename}')
-            with open(f'uploadedFiles/{filename}', 'rb') as f:
-                # res[0].upload(file=f,path='', file_options={"content-type": "jpg"})
-                res[0].upload(fname, f'uploadedFiles/{filename}')
-                return fname
+            fname = str(uuid.uuid4())
+            file.save(tmp_path)
+            res[0].upload(fname, tmp_path)
+            return fname
     return None
             # print(storage_client)
             # print('helooooooooooooooo')

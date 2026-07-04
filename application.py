@@ -192,5 +192,8 @@ def _seed_shticks(user):
     print(f'Inserted {len(posts)} posts pending approval.')
 
 
+# Vercel's Python runtime discovers the WSGI callable by looking for `app`
+app = application
+
 if __name__ == '__main__':
     application.run(debug=True)

@@ -78,8 +78,7 @@ def get_all_approved_shtick_downloads(generalc_id, page):
     except Exception:
         return jsonify({})
 
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-    image_folder = os.path.join(base_dir, 'downloadimages')
+    image_folder = '/tmp/downloadimages'
 
     if not os.path.exists(image_folder):
         return jsonify({})
