@@ -1,5 +1,7 @@
 from marshmallow import Schema, fields
 
+from upload import get_public_url
+
 
 class UserPublicSchema(Schema):
     public_id = fields.Str()
@@ -15,6 +17,13 @@ class GeneralcSchema(Schema):
 class PictureSchema(Schema):
     id = fields.Int()
     name = fields.Str()
+    url = fields.Method('get_image_url')
+
+    def get_image_url(self, obj):
+        try:
+            return get_public_url(obj.name)
+        except Exception:
+            return None
 
 
 class UrlSchema(Schema):

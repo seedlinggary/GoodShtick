@@ -1,5 +1,3 @@
-import os
-import base64
 from flask import Blueprint, jsonify, request
 from sqlalchemy.orm import selectinload
 from config import db, cache
@@ -10,11 +8,11 @@ from backend.shtick.modals.content import Content
 from backend.shtick.modals.url import Url
 from backend.shtick.modals.picture import Picture
 from backend.shtick.modals.generalc import Generalc
-from backend.shtick.schemas.shtick import shtick_schema, shticks_schema, shticks_feed_schema
+from backend.shtick.schemas.shtick import shtick_schema, shticks_schema, shtick_feed_schema, shticks_feed_schema
 import jwt
 from backend.user.modals.user import User
 from config import application
-from upload import upload_file, download_images
+from upload import upload_file
 
 def _feed_options():
     """Eager-load options for the public feed. Called at request time, not import time."""
@@ -52,47 +50,6 @@ def make_approved(current_user):
     return jsonify({'message': 'done'})
 
 
-def _approved_shticks_for_download(generalc_id, limit):
-    """Fetch approved shticks for the image download helper."""
-    if generalc_id == 'all':
-        return (Shtick.query
-                .options(selectinload(Shtick.picture))
-                .filter_by(approved_to_publish=True)
-                .order_by(Shtick.pub_date.desc())
-                .limit(limit).all())
-    return (Shtick.query
-            .options(selectinload(Shtick.picture))
-            .filter_by(approved_to_publish=True, generalc_id=generalc_id)
-            .order_by(Shtick.pub_date.desc())
-            .limit(limit).all())
-
-
-@shtick_api.route('/download/<generalc_id>/<int:page>', methods=['GET'])
-def get_all_approved_shtick_downloads(generalc_id, page):
-    limit = page * 10
-    my_messages = _approved_shticks_for_download(generalc_id, limit)
-
-    image_names = [s.picture.name for s in my_messages if s.picture]
-    try:
-        download_images(image_names)
-    except Exception:
-        return jsonify({})
-
-    image_folder = '/tmp/downloadimages'
-
-    if not os.path.exists(image_folder):
-        return jsonify({})
-
-    images_data = {}
-    for filename in os.listdir(image_folder):
-        full_path = os.path.join(image_folder, filename)
-        if os.path.isfile(full_path):
-            with open(full_path, 'rb') as f:
-                images_data[filename] = base64.b64encode(f.read()).decode('utf-8')
-
-    return jsonify(images_data)
-
-
 @shtick_api.route('/<int:shtick_id>/view', methods=['POST'])
 def record_view(shtick_id):
     """Atomically increment view_count. No auth required — called from the public feed."""
@@ -105,6 +62,21 @@ def record_view(shtick_id):
     )
     db.session.commit()
     return jsonify({'ok': True})
+
+
+@shtick_api.route('/post/<int:shtick_id>', methods=['GET'])
+def get_single_post(shtick_id):
+    """Single approved post, for permalinks/sharing — a plain '<generalc_id>/<page>'
+    URL can't be pointed at from outside, since it always returns a whole page."""
+    shtick = (Shtick.query
+              .options(*_feed_options())
+              .filter_by(id=shtick_id, approved_to_publish=True)
+              .first())
+    if not shtick:
+        return jsonify({'message': 'Post not found'}), 404
+    response = jsonify(shtick_feed_schema.dump(shtick))
+    response.headers['Cache-Control'] = 'public, s-maxage=60, stale-while-revalidate=300'
+    return response
 
 
 @shtick_api.route('/<generalc_id>/<int:page>', methods=['GET'])
@@ -154,13 +126,21 @@ def get_all_approved_shtick(generalc_id, page):
                    .order_by(Shtick.pub_date.desc())
                    .limit(limit).all())
     else:
+        # A post can carry several categories (many-to-many) — match on ANY of
+        # them, not just the legacy single generalc_id, so filtering by a tag
+        # a post has actually finds it regardless of which one is "primary".
         shticks = (Shtick.query
                    .options(*_feed_options())
-                   .filter_by(approved_to_publish=True, generalc_id=generalc_id)
+                   .filter(Shtick.approved_to_publish.is_(True))
+                   .filter(Shtick.categories.any(Generalc.id == generalc_id))
                    .order_by(Shtick.pub_date.desc())
                    .limit(limit).all())
 
     response = jsonify(shticks_feed_schema.dump(shticks))
+    # s-maxage lets Vercel's edge CDN cache this across every region/container,
+    # unlike the in-process SimpleCache above which only helps a single warm
+    # serverless instance re-hit by luck.
+    response.headers['Cache-Control'] = 'public, s-maxage=60, stale-while-revalidate=300'
     cache.set(cache_key, response, timeout=60)
     return response
 
@@ -169,21 +149,28 @@ def get_all_approved_shtick(generalc_id, page):
 @token_required
 def create_shtick(current_user):
     body = request.get_json()
-    if not body or not body.get('caption') or not body.get('category_id'):
-        return jsonify({'message': 'Caption and category are required'}), 400
+    if not body or not body.get('caption'):
+        return jsonify({'message': 'Caption is required'}), 400
+    if len(body['caption']) > 120:
+        return jsonify({'message': 'Caption must be 120 characters or fewer'}), 400
+    if body.get('credit') and len(body['credit']) > 125:
+        return jsonify({'message': 'Credit must be 125 characters or fewer'}), 400
 
-    # Support single category_id or list of category_ids
-    category_ids = body.get('category_ids', [])
+    # One category picker, multiple options selectable — category_id (singular)
+    # is still accepted for old callers, folded into the list either way.
+    category_ids = list(body.get('category_ids') or [])
     primary_id = body.get('category_id')
     if primary_id and primary_id not in category_ids:
-        category_ids = [primary_id] + [c for c in category_ids if c != primary_id]
+        category_ids = [primary_id] + category_ids
+    if not category_ids:
+        return jsonify({'message': 'Please select at least one category'}), 400
 
     new_shtick = Shtick(
         caption=body['caption'],
         credit=body.get('credit', ''),
         specific_category=body.get('specific_category', ''),
         user_id=current_user.public_id,
-        generalc_id=primary_id
+        generalc_id=category_ids[0]
     )
 
     if current_user.is_boss:

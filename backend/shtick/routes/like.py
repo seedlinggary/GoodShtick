@@ -2,7 +2,9 @@ from flask import Blueprint, jsonify, request
 from config import db
 from security import token_required
 from backend.shtick.modals.like import Like
+from backend.shtick.modals.shtick import Shtick
 from backend.shtick.schemas.like import like_schema, likes_schema
+from backend.notifications.helpers import notify
 
 like_api = Blueprint('like_api', __name__, url_prefix='/like')
 
@@ -41,5 +43,16 @@ def like_shtick(current_user):
 
     new_like = Like(user_id=current_user.public_id, shtick_id=shtick_id)
     db.session.add(new_like)
+
+    shtick = db.session.get(Shtick, shtick_id)
+    if shtick:
+        notify(
+            shtick.user_id,
+            f'{current_user.profile_name} liked your post "{shtick.caption[:40]}"',
+            type='like',
+            actor_id=current_user.public_id,
+            link='/',
+        )
+
     db.session.commit()
     return jsonify(like_schema.dump(new_like)), 201

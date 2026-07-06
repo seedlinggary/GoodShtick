@@ -1,14 +1,14 @@
-from flask import flash, redirect
-from werkzeug.utils import secure_filename
 import os
 import uuid
-import shutil
 
-# from storage3 import create_client
-from supabase import create_client, Client
+from werkzeug.utils import secure_filename
+from supabase import create_client
+
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'xlsx', 'xlsb', 'csv'}
 
 _supabase_client = None
+_bucket_name = None
+
 
 def _get_supabase():
     global _supabase_client
@@ -19,82 +19,55 @@ def _get_supabase():
     return _supabase_client
 
 
+def _get_bucket_name():
+    """SUPABASE_BUCKET env var if set, else the first bucket on the project (cached)."""
+    global _bucket_name
+    if _bucket_name is None:
+        _bucket_name = os.environ.get('SUPABASE_BUCKET')
+        if not _bucket_name:
+            buckets = _get_supabase().storage.list_buckets()
+            if not buckets:
+                raise RuntimeError('No Supabase storage buckets found — create one or set SUPABASE_BUCKET.')
+            _bucket_name = buckets[0].name
+    return _bucket_name
+
+
+def _get_bucket():
+    return _get_supabase().storage.from_(_get_bucket_name())
+
 
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-DOWNLOAD_DIR = '/tmp/downloadimages'
-
-def download_images(images_list):
-    my_bucket = _get_supabase().storage.list_buckets()
-    if os.path.exists(DOWNLOAD_DIR):
-        shutil.rmtree(DOWNLOAD_DIR)
-    os.makedirs(DOWNLOAD_DIR)
-    for name in images_list:
-        name_of_file = name + '.jpeg'
-        with open(os.path.join(DOWNLOAD_DIR, name_of_file), 'wb+') as f:
-            res = my_bucket[0].download(name)
-            f.write(res)
-            # completeName = os.path.join('downloadimages', name_of_file)
-
 def upload_file(request):
-    if request.method == 'POST':
-    # check if the post request has the file part
-        if 'file' not in request.files:
-            flash('No file part')
-            print('hi')
-            return None
-        file = request.files['file']
-        # If the user does not select a file, the browser submits an
-        # empty file without a filename.
-        if file.filename == '':
-            flash('No selected file')
-            return None
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            tmp_path = os.path.join('/tmp', filename)
-            res = _get_supabase().storage.list_buckets()
-            fname = str(uuid.uuid4())
-            file.save(tmp_path)
-            res[0].upload(fname, tmp_path)
-            return fname
-    return None
-            # print(storage_client)
-            # print('helooooooooooooooo')
-            # buckets = storage_client.list_buckets()
-            # print(buckets)
-            # print(dir(storage_client))
-            # if not buckets:
-            #     storage_client.create_bucket('shtick')
-            # bucket = buckets[0]
-            # print(dir(bucket))
-            # return bucket.upload(filename, file)
-            # file.save(os.path.join(application.config['UPLOAD_FOLDER'], filename))
-            # return filename
+    """Save the uploaded file to Supabase Storage and return its stored filename."""
+    if request.method != 'POST':
+        return None
+    if 'file' not in request.files:
+        return None
+    file = request.files['file']
+    if file.filename == '' or not allowed_file(file.filename):
+        return None
+
+    secure_filename(file.filename)  # validates the name; storage itself uses a generated id below
+    ext = file.filename.rsplit('.', 1)[1].lower()
+    fname = f'{uuid.uuid4()}.{ext}'
+    tmp_path = os.path.join('/tmp', fname)
+    file.save(tmp_path)
+    try:
+        _get_bucket().upload(fname, tmp_path)
+    finally:
+        os.remove(tmp_path)
+    return fname
 
 
+def get_public_url(filename):
+    """Direct CDN URL for a previously-uploaded file — no download/re-encode round trip.
 
-        
-
-
-
-# url = f"{os.environ.get('SUPABASE_URL')}/storage/goodshtick"
-# key = os.environ.get('SUPABASE_API')
-# headers = {"apiKey": key, "Authorization": f"Bearer {key}"}
-# storage_client = create_client(url, headers, is_async=False)
-# def upload_file(self):
-#     # if 'file' not in request.files:
-#     #     flash('No file part')
-#     #     return redirect('/')
-#     # file = request.files['file']
-#     # if file.filename == '':
-#     #     flash('No selected file')
-#     #     return redirect('/')
-#     filename = 'good-shtick-backend\brian-tromp-B4VXQIJ_oew-unsplash.jpg'
-#     # filename = secure_filename(file.filename)
-
-#     buckets = storage_client.list_buckets()
-#     bucket = buckets[0]
-#     return bucket.upload(filename, file)
+    Requires the Supabase bucket to have public read access enabled.
+    """
+    if not filename:
+        return None
+    return _get_bucket().get_public_url(filename)

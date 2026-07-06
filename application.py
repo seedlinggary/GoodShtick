@@ -12,8 +12,11 @@ from backend.shtick.routes.generalc import generalc_api
 from backend.shtick.routes.shtick import shtick_api
 from backend.shtick.routes.like import like_api
 from backend.shtick.routes.comment import comment_api
+from backend.ads.routes.ads import ads_api
+from backend.notifications.routes.notification import notification_api
 
-# Models (imported so db.create_all() sees them)
+# Models — imported so SQLAlchemy's mapper registry can resolve string-based
+# relationship() references, and so Flask-Migrate autogenerate sees them.
 from backend.user.modals.user import User
 from backend.user.modals.game_score import GameScore
 from backend.shtick.modals.shtick import Shtick
@@ -23,6 +26,10 @@ from backend.shtick.modals.comment import Comment
 from backend.shtick.modals.content import Content
 from backend.shtick.modals.url import Url
 from backend.shtick.modals.picture import Picture
+from backend.ads.modals.ad import Ad
+from backend.ads.modals.ad_impression import AdImpression
+from backend.ads.modals.ad_click import AdClick
+from backend.notifications.modals.notification import Notification
 
 application.register_blueprint(user_api)
 application.register_blueprint(admin_api)
@@ -31,9 +38,13 @@ application.register_blueprint(generalc_api)
 application.register_blueprint(shtick_api)
 application.register_blueprint(like_api)
 application.register_blueprint(comment_api)
+application.register_blueprint(ads_api)
+application.register_blueprint(notification_api)
 
-with application.app_context():
-    db.create_all()
+# Schema is managed exclusively by Alembic migrations (flask db upgrade).
+# db.create_all() must NOT run here: on serverless it fires on every cold
+# start, adding a schema round-trip to Postgres before any request is served,
+# and it can race ahead of a pending migration (this happened once already).
 
 
 @application.route('/login', methods=['GET'])

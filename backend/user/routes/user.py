@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from flask import Blueprint, jsonify, request
 from backend.user.modals.user import User
 from backend.user.schemas.user import users_schema, user_schema
@@ -7,6 +9,8 @@ from werkzeug.security import generate_password_hash
 import uuid
 
 user_api = Blueprint('user_api', __name__, url_prefix='/user')
+
+VALID_GENDERS = {'male', 'female', 'other'}
 
 
 @user_api.route('/new_email', methods=['POST'])
@@ -49,6 +53,37 @@ def add_user():
     db.session.add(new_user)
     db.session.commit()
     return jsonify(user_schema.dump(new_user)), 201
+
+
+@user_api.route('/profile', methods=['PUT'])
+@token_required
+def update_profile(current_user):
+    """Self-service update of the optional ad-targeting fields. Never required, never role/email."""
+    body = request.get_json() or {}
+
+    if 'birthdate' in body:
+        raw = body['birthdate']
+        if not raw:
+            current_user.birthdate = None
+        else:
+            try:
+                current_user.birthdate = datetime.strptime(raw, '%Y-%m-%d').date()
+            except ValueError:
+                return jsonify({'message': 'birthdate must be in YYYY-MM-DD format'}), 400
+
+    if 'gender' in body:
+        gender = (body['gender'] or '').lower() or None
+        if gender and gender not in VALID_GENDERS:
+            return jsonify({'message': f'Invalid gender. Must be one of: {", ".join(VALID_GENDERS)}'}), 400
+        current_user.gender = gender
+
+    if 'location_country' in body:
+        current_user.location_country = body['location_country'] or None
+    if 'location_city' in body:
+        current_user.location_city = body['location_city'] or None
+
+    db.session.commit()
+    return jsonify(user_schema.dump(current_user))
 
 
 @user_api.route('/<public_id>', methods=['GET'])

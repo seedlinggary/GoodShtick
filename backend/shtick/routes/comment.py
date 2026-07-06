@@ -4,6 +4,7 @@ from security import token_required, admin_required
 from backend.shtick.modals.comment import Comment
 from backend.shtick.modals.shtick import Shtick
 from backend.shtick.schemas.shtick import comment_schema, comments_schema
+from backend.notifications.helpers import notify
 
 comment_api = Blueprint('comment_api', __name__, url_prefix='/comment')
 
@@ -29,6 +30,15 @@ def add_comment(current_user):
         user_id=current_user.public_id
     )
     db.session.add(comment)
+
+    notify(
+        shtick.user_id,
+        f'{current_user.profile_name} commented on your post "{shtick.caption[:40]}"',
+        type='comment',
+        actor_id=current_user.public_id,
+        link='/',
+    )
+
     db.session.commit()
     return jsonify(comment_schema.dump(comment)), 201
 

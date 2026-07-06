@@ -10,6 +10,10 @@ class UserSchema(Schema):
     role = fields.Str()
     pub_date = fields.DateTime()
     last_login = fields.DateTime()
+    birthdate = fields.Date()
+    gender = fields.Str()
+    location_country = fields.Str()
+    location_city = fields.Str()
 
 
 class UserPublicSchema(Schema):
