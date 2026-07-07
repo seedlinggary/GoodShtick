@@ -14,6 +14,7 @@ from backend.shtick.routes.like import like_api
 from backend.shtick.routes.comment import comment_api
 from backend.ads.routes.ads import ads_api
 from backend.notifications.routes.notification import notification_api
+from backend.media.routes.media import media_api
 
 # Models — imported so SQLAlchemy's mapper registry can resolve string-based
 # relationship() references, and so Flask-Migrate autogenerate sees them.
@@ -40,6 +41,7 @@ application.register_blueprint(like_api)
 application.register_blueprint(comment_api)
 application.register_blueprint(ads_api)
 application.register_blueprint(notification_api)
+application.register_blueprint(media_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold
