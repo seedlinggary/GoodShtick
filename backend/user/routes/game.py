@@ -26,6 +26,9 @@ VALID_GAMES = {
     # multiplayer games
     'spades', 'uno', 'yahtzee', 'poker', 'codenames',
     'catan', 'scrabble_lite', 'clue', 'risk', 'rummy',
+    # nostalgic arcade
+    'pinball', 'tetris', 'pacman', 'bubble_trouble', 'breakout',
+    'space_invaders', 'frogger', 'asteroids', 'missile_command', 'tank_duel',
 }
 VALID_RESULTS = {'win', 'loss', 'win_with_hint'}
 VALID_DIFFICULTIES = {'easy', 'medium', 'hard'}
