@@ -222,7 +222,10 @@ def _generate_image_filename(client, title, category_name):
         fname = f'{uuid.uuid4()}.png'
         # Mirror upload_file()'s write-to-temp-then-upload flow, but cross-platform
         # (upload_file hardcodes /tmp) and for raw bytes rather than a Flask upload.
-        fd, tmp_path = tempfile.mkstemp(suffix='.png')
+        # Still force /tmp when it exists (Vercel/Linux) rather than trusting
+        # auto-detection, same reasoning as scraper.py's _download_and_store_image.
+        tmp_dir = '/tmp' if os.path.isdir('/tmp') else None
+        fd, tmp_path = tempfile.mkstemp(suffix='.png', dir=tmp_dir)
         try:
             with os.fdopen(fd, 'wb') as fh:
                 fh.write(img_bytes)

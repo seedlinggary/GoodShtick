@@ -2,7 +2,7 @@ import random
 import secrets
 from datetime import datetime, timedelta
 
-from flask import Blueprint, jsonify, make_response, request
+from flask import Blueprint, jsonify, request
 from sqlalchemy import func
 
 from config import cache, db
@@ -10,9 +10,6 @@ from security import super_admin_required, token_optional
 from backend.analytics.modals.visitor import VisitorEvent, VisitorSession
 
 analytics_api = Blueprint('analytics_api', __name__, url_prefix='/analytics')
-
-ANON_COOKIE_NAME = 'anon_id'
-ANON_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # ~1 year
 
 RETENTION_DAYS = 90
 # Lazy-cleanup approach (chosen over a vercel.json cron entry): this repo has
@@ -61,6 +58,17 @@ def beacon(current_user):
     when a valid x-access-token happens to be present, so an anonymous visitor
     who later logs in gets linked to their earlier anonymous activity.
 
+    The anonymous id is generated and persisted client-side (localStorage),
+    not via a cookie -- frontend and backend are separate Vercel deployments
+    (different origins), so a cookie set here would be a cross-site/third-party
+    cookie from the page's point of view, and browsers increasingly restrict
+    or outright drop those (Safari ITP, Firefox ETP, and similar are now the
+    default posture for a large share of real traffic, not an edge case).
+    That silently made nearly every page view look like a brand-new anonymous
+    visitor. localStorage is same-origin only, so it isn't subject to any of
+    that -- this matches how the JWT auth token is already handled elsewhere
+    in this app (also localStorage, not a cookie), for the same reason.
+
     `force: true` in the JSON body is a TEST-ONLY escape hatch (see the class
     docstring on VisitorSession / task notes) that bypasses the "don't write
     localhost traffic" skip so the write path can be exercised from a dev
@@ -70,10 +78,7 @@ def beacon(current_user):
     body = request.get_json(silent=True) or {}
     force = bool(body.get('force'))
 
-    anon_id = request.cookies.get(ANON_COOKIE_NAME)
-    is_new_cookie = not anon_id
-    if not anon_id:
-        anon_id = secrets.token_urlsafe(32)
+    anon_id = (body.get('anon_id') or '').strip()[:64] or secrets.token_urlsafe(32)
 
     is_localhost = _looks_like_localhost()
     skip_write = is_localhost and not force
@@ -110,47 +115,7 @@ def beacon(current_user):
         db.session.commit()
         _maybe_cleanup()
 
-    resp = make_response(jsonify({'message': 'ok'}))
-    if is_new_cookie:
-        # Frontend and backend are separate Vercel deployments (different
-        # origins), so this is a cross-site fetch() in production -- SameSite=Lax
-        # cookies are NOT sent on cross-site XHR/fetch (only top-level nav), which
-        # would silently make every page view look like a brand-new anonymous
-        # visitor. SameSite=None (+ the Secure it requires) fixes that; local HTTP
-        # dev can't set Secure cookies at all, so it falls back to Lax there,
-        # where same-origin/localhost fetches work fine either way.
-        if is_localhost:
-            resp.set_cookie(
-                ANON_COOKIE_NAME, anon_id,
-                max_age=ANON_COOKIE_MAX_AGE, httponly=True, samesite='Lax',
-            )
-        else:
-            resp.set_cookie(
-                ANON_COOKIE_NAME, anon_id,
-                max_age=ANON_COOKIE_MAX_AGE, httponly=True, samesite='None', secure=True,
-            )
-    return resp
-
-
-@analytics_api.route('/logout', methods=['POST'])
-def logout_reset():
-    """Clears the anon_id cookie on sign-out.
-
-    Without this, a browser that ever logged in keeps the SAME anon_id
-    forever (see beacon()'s backfill), so VisitorSession.user_id -- set once,
-    never cleared -- permanently misclassifies that browser as "logged in"
-    even after signing out and browsing anonymously. Dropping the cookie here
-    makes the next beacon() call mint a fresh anon_id, so genuinely anonymous
-    post-logout activity lands in a new, correctly-anonymous session row. The
-    old session row is untouched and still accurately reflects the time the
-    visitor spent logged in.
-    """
-    resp = make_response(jsonify({'message': 'ok'}))
-    if _looks_like_localhost():
-        resp.set_cookie(ANON_COOKIE_NAME, '', max_age=0, httponly=True, samesite='Lax')
-    else:
-        resp.set_cookie(ANON_COOKIE_NAME, '', max_age=0, httponly=True, samesite='None', secure=True)
-    return resp
+    return jsonify({'message': 'ok', 'anon_id': anon_id})
 
 
 def _visitor_counts(days):

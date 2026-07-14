@@ -298,7 +298,12 @@ def _download_and_store_image(client, image_url):
         return None
 
     fname = f'{uuid.uuid4()}.{ext}'
-    fd, tmp_path = tempfile.mkstemp(suffix=f'.{ext}')
+    # Force /tmp when it exists (Vercel/Linux -- the only writable path in
+    # that serverless filesystem) instead of trusting tempfile's own
+    # auto-detection, matching upload.py's proven-working upload_file(). Falls
+    # back to plain auto-detection on Windows dev, where /tmp doesn't exist.
+    tmp_dir = '/tmp' if os.path.isdir('/tmp') else None
+    fd, tmp_path = tempfile.mkstemp(suffix=f'.{ext}', dir=tmp_dir)
     try:
         with os.fdopen(fd, 'wb') as fh:
             fh.write(data)
