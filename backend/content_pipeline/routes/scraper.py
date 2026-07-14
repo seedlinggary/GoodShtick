@@ -46,6 +46,7 @@ robots.txt (checked 2026-07-12):
     string must never be changed to impersonate one of the blocked names.
 """
 import html
+import logging
 import mimetypes
 import os
 import re
@@ -65,6 +66,8 @@ from backend.shtick.modals.picture import Picture
 from backend.shtick.modals.generalc import Generalc
 from backend.content_pipeline.modals.scraped_article import ScrapedArticle
 from upload import _get_bucket
+
+logger = logging.getLogger(__name__)
 
 scraper_api = Blueprint('scraper_api', __name__, url_prefix='/content-pipeline/scrape')
 
@@ -230,26 +233,20 @@ def _fetch_yeshivaworld(client, count):
 # source key -> config. Sources with `feed` + `parser` are RSS (see module
 # docstring); israelnationalnews and yeshivaworld instead have `fetch(client,
 # count)` since they're scraped/REST, not RSS, and paginate by count rather
-# than returning a fixed-size feed. `og_image_fallback`: True for sources
-# whose data carries no usable image, so run_scraper fetches the individual
-# article page's og:image instead -- none currently need this (all three
-# embed a real image directly), it's kept as a safety net.
+# than returning a fixed-size feed.
 SOURCES = {
     'israelnationalnews': {
         'fetch': _fetch_israelnationalnews,
         'credit': 'Israel National News',
-        'og_image_fallback': False,  # real image comes straight off the homepage
     },
     'yeshivaworld': {
         'fetch': _fetch_yeshivaworld,
         'credit': 'The Yeshiva World',
-        'og_image_fallback': False,  # featured image comes back with the post itself
     },
     'dansdeals': {
         'feed': 'https://www.dansdeals.com/feed/',
         'parser': _parse_dansdeals,
         'credit': 'DansDeals',
-        'og_image_fallback': False,  # already gets a real image from the RSS description
     },
 }
 
@@ -281,7 +278,8 @@ def _download_and_store_image(client, image_url):
     try:
         resp = client.get(image_url, timeout=IMAGE_FETCH_TIMEOUT)
         resp.raise_for_status()
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
+        logger.warning('Image download failed for %s: %s', image_url, exc)
         return None
 
     content_type = resp.headers.get('content-type', '').split(';')[0].strip().lower()
@@ -290,10 +288,13 @@ def _download_and_store_image(client, image_url):
         guessed, _ = mimetypes.guess_type(image_url)
         ext = IMAGE_CONTENT_TYPES.get(guessed or '')
     if not ext:
+        logger.warning('Image at %s has unrecognized content-type %r -- skipping', image_url, content_type)
         return None  # not a recognizable image type -- skip rather than upload garbage
 
     data = resp.content
     if not data or len(data) > MAX_IMAGE_BYTES:
+        logger.warning('Image at %s is empty or over the %d byte limit (%s bytes) -- skipping',
+                        image_url, MAX_IMAGE_BYTES, len(data) if data else 0)
         return None
 
     fname = f'{uuid.uuid4()}.{ext}'
@@ -302,23 +303,34 @@ def _download_and_store_image(client, image_url):
         with os.fdopen(fd, 'wb') as fh:
             fh.write(data)
         _get_bucket().upload(fname, tmp_path, {'content-type': content_type or f'image/{ext}'})
-    except Exception:  # noqa: BLE001 -- image upload is optional, never sink the post
+    except Exception as exc:  # noqa: BLE001 -- image upload is optional, never sink the post
+        logger.warning('Image upload to storage failed for %s: %s', image_url, exc)
         return None
     finally:
         os.remove(tmp_path)
     return fname
 
 
-def _resolve_image(client, source, art):
+def _resolve_image(client, art):
     """Figure out the best image URL for one article, then download+store it.
-    Returns a Picture-ready filename, or None. All three sources embed a real
-    image directly now, so the og:image fallback fetch is just a safety net
-    for the rare item that's missing one."""
+    Returns a Picture-ready filename, or None.
+
+    Tries the RSS/feed-embedded image first (cheap -- no extra request). If
+    that's missing, OR present but fails to download/upload for any reason
+    (dead link, host blocking the scraper's IP/UA, transient network error,
+    ...), falls back to fetching the article's own page and pulling its
+    og:image before giving up -- a source's image sometimes embeds fine
+    locally but silently fails from a different network (e.g. a datacenter
+    IP a CDN treats differently than a residential one), and previously there
+    was no second attempt in that case at all, so a single failed download
+    meant the post published with no picture."""
     image_url = art.get('image_url')
-    cfg = SOURCES[source]
-    if not image_url and cfg.get('og_image_fallback'):
-        image_url = _fetch_og_image(client, art['url'])
-    return _download_and_store_image(client, image_url)
+    picture_name = _download_and_store_image(client, image_url) if image_url else None
+    if not picture_name:
+        fallback_url = _fetch_og_image(client, art['url'])
+        if fallback_url and fallback_url != image_url:
+            picture_name = _download_and_store_image(client, fallback_url)
+    return picture_name
 
 
 def _get_news_category():
@@ -363,8 +375,8 @@ def run_scraper(current_user, source):
     cfg = SOURCES[source]
 
     # One request to list articles (RSS feed, or the wp-json endpoint for
-    # yeshivaworld); the client stays open afterward since sources with
-    # og_image_fallback need it again per-article for an image.
+    # yeshivaworld); the client stays open afterward since each article may
+    # need it again for an image (og:image fallback, see _resolve_image).
     try:
         with httpx.Client(headers={'User-Agent': USER_AGENT},
                           timeout=25, follow_redirects=True) as client:
@@ -423,7 +435,7 @@ def run_scraper(current_user, source):
                     source=source, url=link, title=art['title'][:300], shtick_id=shtick.id
                 ))
 
-                picture_name = _resolve_image(client, source, art)
+                picture_name = _resolve_image(client, art)
                 if picture_name:
                     db.session.add(Picture(name=picture_name, shtick_id=shtick.id))
 
