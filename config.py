@@ -2,7 +2,6 @@ import os
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
 from flask import Flask
-from flask_mail import Mail
 from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_caching import Cache
@@ -48,16 +47,8 @@ application.config['COMPRESS_MIMETYPES'] = [
     'application/json', 'text/html', 'text/css', 'application/javascript'
 ]
 
-application.config['MAIL_SERVER'] = 'smtp.gmail.com'
-application.config['MAIL_PORT'] = 465
-application.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME')
-application.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD')
-application.config['MAIL_USE_TLS'] = False
-application.config['MAIL_USE_SSL'] = True
-
 db.init_app(application)
 ma.init_app(application)
 cache.init_app(application)
 Compress(application)
-mail = Mail(application)
 migrate = Migrate(application, db)

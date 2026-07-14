@@ -79,9 +79,19 @@ def get_single_post(shtick_id):
     return response
 
 
+PAGE_SIZE = 10
+
+
 @shtick_api.route('/<generalc_id>/<int:page>', methods=['GET'])
 def get_all_approved_shtick(generalc_id, page):
-    limit = page * 10
+    # `page` was previously treated as a cumulative multiplier (limit = page*10),
+    # so every "Load more" click re-fetched, re-serialized, and re-cached EVERY
+    # previously-seen row from scratch on top of the new ones -- quadratic cost
+    # as a user scrolls, and an ever-growing set of cache entries (one per
+    # distinct limit ever requested) that never got reused. Real OFFSET/LIMIT
+    # paging below: each page is fetched, serialized, and cached exactly once,
+    # and the frontend appends pages instead of replacing the whole feed.
+    offset = (page - 1) * PAGE_SIZE
 
     # Auth-gated modes bypass the cache (personal data)
     if generalc_id in ('0', 'liked'):
@@ -113,8 +123,9 @@ def get_all_approved_shtick(generalc_id, page):
                    .order_by(Shtick.pub_date.desc()).all())
         return jsonify(shticks_feed_schema.dump(shticks))
 
-    # Public feed — cache by category + page
-    cache_key = f'feed:{generalc_id}:{limit}'
+    # Public feed — cache by category + page (bounded set of keys now that
+    # each page is its own entry, instead of one growing entry per cumulative limit)
+    cache_key = f'feed:{generalc_id}:page:{page}'
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
@@ -124,7 +135,7 @@ def get_all_approved_shtick(generalc_id, page):
                    .options(*_feed_options())
                    .filter_by(approved_to_publish=True)
                    .order_by(Shtick.pub_date.desc())
-                   .limit(limit).all())
+                   .offset(offset).limit(PAGE_SIZE).all())
     else:
         # A post can carry several categories (many-to-many) — match on ANY of
         # them, not just the legacy single generalc_id, so filtering by a tag
@@ -134,7 +145,7 @@ def get_all_approved_shtick(generalc_id, page):
                    .filter(Shtick.approved_to_publish.is_(True))
                    .filter(Shtick.categories.any(Generalc.id == generalc_id))
                    .order_by(Shtick.pub_date.desc())
-                   .limit(limit).all())
+                   .offset(offset).limit(PAGE_SIZE).all())
 
     response = jsonify(shticks_feed_schema.dump(shticks))
     # s-maxage lets Vercel's edge CDN cache this across every region/container,

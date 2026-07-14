@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, request
+from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from config import db, cache
 from security import admin_required, super_admin_required
@@ -8,6 +9,12 @@ from backend.shtick.modals.shtick import Shtick
 from backend.shtick.schemas.shtick import shticks_schema
 from backend.shtick.modals.comment import Comment
 from backend.shtick.schemas.shtick import comments_schema
+from backend.shtick.modals.like import Like
+from backend.shtick.modals.content import Content
+from backend.shtick.modals.generalc import Generalc
+from backend.hock.modals.hock_post import HockPost
+from backend.hock.modals.hock_comment import HockComment
+from backend.tachlis.modals.tachlis_post import TachlisPost
 from backend.user.modals.game_score import GameScore
 from backend.user.schemas.game_score import game_scores_schema
 
@@ -52,6 +59,48 @@ def approve_shtick(current_user, shtick_id):
     db.session.commit()
     cache.clear()
     return jsonify({'message': 'approved' if approved else 'rejected'})
+
+
+@admin_api.route('/shtick/<int:shtick_id>/unapprove', methods=['POST'])
+@super_admin_required
+def unapprove_shtick(_current_user, shtick_id):
+    """Revert an already-approved (or rejected) post back to the pending queue."""
+    shtick = db.session.get(Shtick, shtick_id)
+    if not shtick:
+        return jsonify({'message': 'Not found'}), 404
+    shtick.approved_to_publish = None
+    shtick.approved_by = None
+    db.session.commit()
+    cache.clear()
+    return jsonify({'message': 'unapproved'})
+
+
+MAX_BULK_APPROVE = 200
+
+
+@admin_api.route('/shtick/bulk-approve', methods=['POST'])
+@admin_required
+def bulk_approve_shtick(current_user):
+    """Approve or reject many pending posts in one request -- avoids clicking
+    Approve/Reject one at a time on a large backlog."""
+    body = request.get_json() or {}
+    ids = body.get('ids')
+    if not ids or not isinstance(ids, list):
+        return jsonify({'message': 'ids must be a non-empty list'}), 400
+    if len(ids) > MAX_BULK_APPROVE:
+        return jsonify({'message': f'Cannot process more than {MAX_BULK_APPROVE} at once'}), 400
+
+    approved = not body.get('reject', False)
+    updated = (
+        Shtick.query.filter(Shtick.id.in_(ids))
+        .update(
+            {'approved_to_publish': approved, 'approved_by': current_user.public_id},
+            synchronize_session=False,
+        )
+    )
+    db.session.commit()
+    cache.clear()
+    return jsonify({'message': 'approved' if approved else 'rejected', 'updated': updated})
 
 
 @admin_api.route('/shtick/<int:shtick_id>', methods=['PATCH'])
@@ -100,19 +149,55 @@ def all_comments(_current_user):
     return jsonify(comments_schema.dump(comments))
 
 
+@admin_api.route('/comments/<int:comment_id>/unapprove', methods=['POST'])
+@super_admin_required
+def unapprove_comment(_current_user, comment_id):
+    """Hide a feed comment from public view without deleting it."""
+    comment = db.session.get(Comment, comment_id)
+    if not comment:
+        return jsonify({'message': 'Not found'}), 404
+    comment.approved_to_publish = False
+    db.session.commit()
+    return jsonify({'message': 'unapproved'})
+
+
+@admin_api.route('/comments/<int:comment_id>/approve', methods=['POST'])
+@super_admin_required
+def approve_comment(_current_user, comment_id):
+    """Restore a hidden feed comment to public view."""
+    comment = db.session.get(Comment, comment_id)
+    if not comment:
+        return jsonify({'message': 'Not found'}), 404
+    comment.approved_to_publish = True
+    db.session.commit()
+    return jsonify({'message': 'approved'})
+
+
 # ── Super-admin routes ────────────────────────────────────────────────────────
 
 @admin_api.route('/users', methods=['GET'])
 @super_admin_required
 def list_users(_current_user):
     users = User.query.order_by(User.pub_date.asc()).all()
+
+    # Batched counts instead of N+1 lazy-loading each user's four collections
+    # (was 1 + 4*N queries for N users -- now a fixed 4 regardless of N).
+    def counts_by_user(group_col):
+        rows = db.session.query(group_col, func.count()).group_by(group_col).all()
+        return dict(rows)
+
+    shtick_counts = counts_by_user(Shtick.user_id)
+    like_counts = counts_by_user(Like.user_id)
+    comment_counts = counts_by_user(Comment.user_id)
+    game_counts = counts_by_user(GameScore.user_id)
+
     result = []
     for u in users:
         data = user_schema.dump(u)
-        data['shtick_count'] = len(u.shticks)
-        data['like_count'] = len(u.likes)
-        data['comment_count'] = len(u.comments)
-        data['game_count'] = len(u.game_scores)
+        data['shtick_count'] = shtick_counts.get(u.public_id, 0)
+        data['like_count'] = like_counts.get(u.public_id, 0)
+        data['comment_count'] = comment_counts.get(u.public_id, 0)
+        data['game_count'] = game_counts.get(u.public_id, 0)
         result.append(data)
     return jsonify(result)
 
@@ -156,13 +241,13 @@ def user_activity(_current_user, public_id):
 
 @admin_api.route('/stats', methods=['GET'])
 @super_admin_required
+@cache.cached(timeout=60)
 def platform_stats(_current_user):
     total_users = User.query.count()
     total_shticks = Shtick.query.count()
     pending_shticks = Shtick.query.filter_by(approved_to_publish=None).count()
     approved_shticks = Shtick.query.filter_by(approved_to_publish=True).count()
     total_comments = Comment.query.count()
-    from backend.shtick.modals.like import Like
     total_likes = Like.query.count()
     total_games = GameScore.query.count()
     return jsonify({
@@ -192,6 +277,121 @@ def approval_history(_current_user):
                 .filter(Shtick.approved_by.isnot(None))
                 .order_by(Shtick.pub_date.desc()).all())
     return jsonify(shticks_schema.dump(approved))
+
+
+SEARCH_LIMIT = 25
+
+
+@admin_api.route('/search', methods=['GET'])
+@admin_required
+def admin_search(_current_user):
+    """Cross-table lookup for the SuperAdmin console's search bar -- checks
+    id, title/caption/body/text, category, and submitted-by across every
+    content type (Feed posts, Hock posts, Hock comments, Tachlis posts, Feed
+    comments) plus the Users table itself."""
+    q = (request.args.get('q') or '').strip()
+    if not q:
+        return jsonify({
+            'shticks': [], 'hock_posts': [], 'hock_comments': [],
+            'tachlis_posts': [], 'comments': [], 'users': [],
+        })
+
+    like = f'%{q}%'
+    is_id = q.isdigit()
+
+    shtick_filters = [
+        Shtick.caption.ilike(like), Shtick.credit.ilike(like),
+        Shtick.specific_category.ilike(like), Content.stuff.ilike(like),
+        Generalc.name.ilike(like), User.profile_name.ilike(like), User.email.ilike(like),
+    ]
+    if is_id:
+        shtick_filters.append(Shtick.id == int(q))
+    shticks = (Shtick.query
+               .join(Shtick.user)
+               .outerjoin(Shtick.content)
+               .outerjoin(Shtick.categories)
+               .filter(db.or_(*shtick_filters))
+               .order_by(Shtick.pub_date.desc())
+               .distinct().limit(SEARCH_LIMIT).all())
+    shticks_data = [{
+        'id': s.id, 'caption': s.caption, 'approved_to_publish': s.approved_to_publish,
+        'pub_date': str(s.pub_date), 'submitted_by': s.user.profile_name if s.user else None,
+    } for s in shticks]
+
+    hock_filters = [
+        HockPost.title.ilike(like), HockPost.body.ilike(like),
+        User.profile_name.ilike(like), User.email.ilike(like),
+    ]
+    if is_id:
+        hock_filters.append(HockPost.id == int(q))
+    hock_posts = (HockPost.query.join(HockPost.user)
+                  .filter(db.or_(*hock_filters))
+                  .order_by(HockPost.pub_date.desc())
+                  .limit(SEARCH_LIMIT).all())
+    hock_posts_data = [{
+        'id': p.id, 'title': p.title, 'approved_to_publish': p.approved_to_publish,
+        'pub_date': str(p.pub_date), 'submitted_by': p.user.profile_name if p.user else None,
+    } for p in hock_posts]
+
+    hock_comment_filters = [HockComment.text.ilike(like), User.profile_name.ilike(like), User.email.ilike(like)]
+    if is_id:
+        hock_comment_filters.append(HockComment.id == int(q))
+    hock_comments = (HockComment.query.join(HockComment.user)
+                      .filter(db.or_(*hock_comment_filters))
+                      .order_by(HockComment.pub_date.desc())
+                      .limit(SEARCH_LIMIT).all())
+    hock_comments_data = [{
+        'id': c.id, 'text': c.text, 'hock_post_id': c.hock_post_id,
+        'approved_to_publish': c.approved_to_publish, 'pub_date': str(c.pub_date),
+        'submitted_by': c.user.profile_name if c.user else None,
+    } for c in hock_comments]
+
+    tachlis_filters = [
+        TachlisPost.title.ilike(like), TachlisPost.body.ilike(like), TachlisPost.post_type.ilike(like),
+        TachlisPost.location.ilike(like), TachlisPost.compensation.ilike(like), TachlisPost.contact.ilike(like),
+        User.profile_name.ilike(like), User.email.ilike(like),
+    ]
+    if is_id:
+        tachlis_filters.append(TachlisPost.id == int(q))
+    tachlis_posts = (TachlisPost.query.join(TachlisPost.user)
+                      .filter(db.or_(*tachlis_filters))
+                      .order_by(TachlisPost.pub_date.desc())
+                      .limit(SEARCH_LIMIT).all())
+    tachlis_posts_data = [{
+        'id': t.id, 'title': t.title, 'post_type': t.post_type,
+        'approved_to_publish': t.approved_to_publish, 'pub_date': str(t.pub_date),
+        'submitted_by': t.user.profile_name if t.user else None,
+    } for t in tachlis_posts]
+
+    comment_filters = [Comment.text.ilike(like), User.profile_name.ilike(like), User.email.ilike(like)]
+    if is_id:
+        comment_filters.append(Comment.id == int(q))
+    comments = (Comment.query.join(Comment.user)
+                .filter(db.or_(*comment_filters))
+                .order_by(Comment.pub_date.desc())
+                .limit(SEARCH_LIMIT).all())
+    comments_data = [{
+        'id': c.id, 'text': c.text, 'shtick_id': c.shtick_id,
+        'approved_to_publish': c.approved_to_publish, 'pub_date': str(c.pub_date),
+        'submitted_by': c.user.profile_name if c.user else None,
+    } for c in comments]
+
+    user_filters = [
+        User.profile_name.ilike(like), User.email.ilike(like),
+        User.first_name.ilike(like), User.last_name.ilike(like), User.public_id.ilike(like),
+    ]
+    if is_id:
+        user_filters.append(User.id == int(q))
+    users = User.query.filter(db.or_(*user_filters)).limit(SEARCH_LIMIT).all()
+    users_data = [{
+        'id': u.id, 'public_id': u.public_id, 'profile_name': u.profile_name,
+        'email': u.email, 'role': u.role,
+    } for u in users]
+
+    return jsonify({
+        'shticks': shticks_data, 'hock_posts': hock_posts_data, 'hock_comments': hock_comments_data,
+        'tachlis_posts': tachlis_posts_data, 'comments': comments_data, 'users': users_data,
+    })
 
 
 @admin_api.route('/seed', methods=['POST'])

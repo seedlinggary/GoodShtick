@@ -16,12 +16,18 @@ class Shtick(db.Model):
     caption = db.Column(db.String(120))
     credit = db.Column(db.String(125))
     specific_category = db.Column(db.String(120))
-    pub_date = db.Column(db.DateTime, default=datetime.utcnow)
-    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'))
+    pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), index=True)
     approved_by = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=True)
-    generalc_id = db.Column(db.Integer, db.ForeignKey('generalc.id'))
+    generalc_id = db.Column(db.Integer, db.ForeignKey('generalc.id'), index=True)
     approved_to_publish = db.Column(db.Boolean, default=None)
     view_count = db.Column(db.Integer, default=0, nullable=False)
+
+    __table_args__ = (
+        # Matches the exact filter+sort pattern used by every feed/listing query:
+        # WHERE approved_to_publish = ... ORDER BY pub_date DESC.
+        db.Index('ix_shtick_approved_pub_date', 'approved_to_publish', 'pub_date'),
+    )
 
     # Relationships
     user = db.relationship('User', foreign_keys=[user_id],

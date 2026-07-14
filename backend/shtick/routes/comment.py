@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request
 from config import db
-from security import token_required, admin_required
+from security import token_required, token_optional, admin_required
 from backend.shtick.modals.comment import Comment
 from backend.shtick.modals.shtick import Shtick
 from backend.shtick.schemas.shtick import comment_schema, comments_schema
@@ -10,8 +10,12 @@ comment_api = Blueprint('comment_api', __name__, url_prefix='/comment')
 
 
 @comment_api.route('/<int:shtick_id>', methods=['GET'])
-def get_comments(shtick_id):
-    comments = Comment.query.filter_by(shtick_id=shtick_id).order_by(Comment.pub_date.asc()).all()
+@token_optional
+def get_comments(current_user, shtick_id):
+    query = Comment.query.filter_by(shtick_id=shtick_id)
+    if not (current_user and current_user.is_boss):
+        query = query.filter_by(approved_to_publish=True)
+    comments = query.order_by(Comment.pub_date.asc()).all()
     return jsonify(comments_schema.dump(comments))
 
 

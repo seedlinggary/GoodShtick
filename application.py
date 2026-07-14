@@ -15,6 +15,14 @@ from backend.shtick.routes.comment import comment_api
 from backend.ads.routes.ads import ads_api
 from backend.notifications.routes.notification import notification_api
 from backend.media.routes.media import media_api
+from backend.hock.routes.hock_post import hock_post_api
+from backend.hock.routes.hock_comment import hock_comment_api
+from backend.content_pipeline.routes.ai_content import ai_content_api
+from backend.content_pipeline.routes.scraper import scraper_api
+from backend.content_pipeline.routes.youtube import youtube_api
+from backend.contact.routes.contact import contact_api
+from backend.tachlis.routes.tachlis_post import tachlis_api
+from backend.analytics.routes.visitor import analytics_api
 
 # Models — imported so SQLAlchemy's mapper registry can resolve string-based
 # relationship() references, and so Flask-Migrate autogenerate sees them.
@@ -31,6 +39,13 @@ from backend.ads.modals.ad import Ad
 from backend.ads.modals.ad_impression import AdImpression
 from backend.ads.modals.ad_click import AdClick
 from backend.notifications.modals.notification import Notification
+from backend.hock.modals.hock_post import HockPost
+from backend.hock.modals.hock_comment import HockComment
+from backend.hock.modals.hock_like import HockPostLike, HockCommentLike
+from backend.content_pipeline.modals.scraped_article import ScrapedArticle
+from backend.content_pipeline.modals.youtube_channel import YoutubeChannel, YoutubeVideoPost
+from backend.tachlis.modals.tachlis_post import TachlisPost
+from backend.analytics.modals.visitor import VisitorSession, VisitorEvent
 
 application.register_blueprint(user_api)
 application.register_blueprint(admin_api)
@@ -42,6 +57,14 @@ application.register_blueprint(comment_api)
 application.register_blueprint(ads_api)
 application.register_blueprint(notification_api)
 application.register_blueprint(media_api)
+application.register_blueprint(hock_post_api)
+application.register_blueprint(hock_comment_api)
+application.register_blueprint(ai_content_api)
+application.register_blueprint(scraper_api)
+application.register_blueprint(youtube_api)
+application.register_blueprint(contact_api)
+application.register_blueprint(tachlis_api)
+application.register_blueprint(analytics_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold

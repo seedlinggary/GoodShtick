@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from config import db
+from config import db, cache
 from security import super_admin_required
 from backend.shtick.modals.generalc import Generalc
 from backend.shtick.modals.shtick import Shtick, shtick_categories
@@ -7,10 +7,14 @@ from backend.shtick.schemas.generalc import generalc_schema, generalcs_schema
 
 generalc_api = Blueprint('generalc_api', __name__, url_prefix='/generalc')
 
-NAME_MAX = 20
+# Must match Generalc.name's actual column width (String(100), widened for
+# longer AI-generated category names) -- this constant had drifted out of
+# sync with the DB column and would wrongly reject valid long names.
+NAME_MAX = 100
 
 
 @generalc_api.route('', methods=['GET'])
+@cache.cached(timeout=600)  # categories barely ever change; hit on every page load via Navbar
 def get_generalcs():
     all_generalc = Generalc.query.order_by(Generalc.name.asc()).all()
     result = generalcs_schema.dump(all_generalc)
@@ -32,6 +36,7 @@ def create_generalc(_current_user):
     cat = Generalc(name)
     db.session.add(cat)
     db.session.commit()
+    cache.clear()
     return jsonify(generalc_schema.dump(cat)), 201
 
 
@@ -49,4 +54,5 @@ def delete_generalc(_current_user, generalc_id):
 
     db.session.delete(cat)
     db.session.commit()
+    cache.clear()
     return jsonify({'message': 'deleted'})

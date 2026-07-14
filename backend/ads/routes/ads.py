@@ -1,8 +1,9 @@
 import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request, redirect
+from sqlalchemy import func
 
 from config import db, FRONTEND_ORIGINS
 from security import token_optional, super_admin_required
@@ -179,6 +180,51 @@ def serve_ads_batch(current_user):
     return jsonify(result)
 
 
+MAX_SERVE_MANY = 20
+
+
+@ads_api.route('/serve_many', methods=['GET'])
+@token_optional
+def serve_ads_many(current_user):
+    """Several DISTINCT ads for the same placement in one round trip -- for a
+    page that repeats one placement multiple times (e.g. one in-feed ad every
+    5 posts). /serve_batch covers several DIFFERENT placements at once but
+    only one ad per placement, so it can't serve this case."""
+    placement = request.args.get('placement', '')
+    if placement not in VALID_PLACEMENTS:
+        return jsonify([])
+    try:
+        count = int(request.args.get('count', 1))
+    except (TypeError, ValueError):
+        count = 1
+    count = max(1, min(count, MAX_SERVE_MANY))
+
+    exclude_raw = request.args.get('exclude', '')
+    excluded_ids = {int(x) for x in exclude_raw.split(',') if x.strip().isdigit()}
+
+    now = datetime.utcnow()
+    age = current_user.age if current_user else None
+    gender = current_user.gender if current_user else None
+    country = (current_user.location_country if current_user and current_user.location_country
+               else _visitor_country())
+
+    picked = []
+    for _ in range(count):
+        chosen = _pick_ad(placement, excluded_ids, now, age, gender, country)
+        if not chosen:
+            break
+        _log_impression(chosen, placement, current_user, country)
+        excluded_ids.add(chosen.id)  # don't repeat the same ad within this batch
+        picked.append(chosen)
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+    return jsonify(ad_serve_schema.dump(picked, many=True))
+
+
 @ads_api.route('/<int:ad_id>/click', methods=['GET'])
 @token_optional
 def click_ad(current_user, ad_id):
@@ -327,15 +373,50 @@ def upload_ad_image(_current_user, ad_id):
 @ads_api.route('/<int:ad_id>/stats', methods=['GET'])
 @super_admin_required
 def ad_stats(_current_user, ad_id):
+    """Detailed per-ad report for advertisers: totals, CTR, unique logged-in
+    viewers, country breakdown, and a 30-day daily trend -- everything here
+    comes from data already being captured on every serve/click
+    (_log_impression/click_ad), just not aggregated or surfaced until now."""
     ad = db.session.get(Ad, ad_id)
     if not ad:
         return jsonify({'message': 'Ad not found'}), 404
+
     impressions = AdImpression.query.filter_by(ad_id=ad_id).count()
     clicks = AdClick.query.filter_by(ad_id=ad_id).count()
     ctr = round((clicks / impressions) * 100, 2) if impressions else 0
+
+    unique_logged_in_viewers = (
+        db.session.query(func.count(func.distinct(AdImpression.user_id)))
+        .filter(AdImpression.ad_id == ad_id, AdImpression.user_id.isnot(None))
+        .scalar() or 0
+    )
+
+    country_rows = (
+        db.session.query(AdImpression.country, func.count())
+        .filter(AdImpression.ad_id == ad_id, AdImpression.country.isnot(None))
+        .group_by(AdImpression.country)
+        .order_by(func.count().desc())
+        .limit(10)
+        .all()
+    )
+    top_countries = [{'country': c, 'impressions': n} for c, n in country_rows]
+
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    daily_rows = (
+        db.session.query(func.date(AdImpression.viewed_at), func.count())
+        .filter(AdImpression.ad_id == ad_id, AdImpression.viewed_at >= cutoff)
+        .group_by(func.date(AdImpression.viewed_at))
+        .order_by(func.date(AdImpression.viewed_at))
+        .all()
+    )
+    daily_trend = [{'date': str(d), 'impressions': n} for d, n in daily_rows]
+
     return jsonify({
         'ad_id': ad_id,
         'impressions': impressions,
         'clicks': clicks,
         'ctr_percent': ctr,
+        'unique_logged_in_viewers': unique_logged_in_viewers,
+        'top_countries': top_countries,
+        'daily_trend_30d': daily_trend,
     })

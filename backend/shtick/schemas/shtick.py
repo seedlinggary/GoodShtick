@@ -41,6 +41,8 @@ class CommentSchema(Schema):
     text = fields.Str()
     pub_date = fields.DateTime()
     user_id = fields.Str()
+    shtick_id = fields.Int()
+    approved_to_publish = fields.Bool()
     user = fields.Nested(UserPublicSchema)
 
 
