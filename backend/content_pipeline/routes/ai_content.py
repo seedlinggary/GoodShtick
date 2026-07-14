@@ -110,26 +110,26 @@ def _system_prompt(category_name, avoid_titles=None):
     is_jewish_category = 'jewish' in lower or 'religious' in lower
 
     if is_jewish_category and 'funny' in lower:
-        identity = "You are a content writer for 'The Good Shtick', a wholesome Jewish content website."
+        identity = "You are a content writer for 'Gut Shtick', a wholesome Jewish content website."
         theme = (
             "a short, genuinely funny and good-natured joke or anecdote with a "
             "Jewish-religious angle. Keep it warm and clever, never mean-spirited "
             "or offensive."
         )
     elif is_jewish_category and ('feel good' in lower or 'feel-good' in lower):
-        identity = "You are a content writer for 'The Good Shtick', a wholesome Jewish content website."
+        identity = "You are a content writer for 'Gut Shtick', a wholesome Jewish content website."
         theme = (
             "a short, uplifting and heartwarming story or teaching rooted in "
             "Jewish religious tradition that leaves the reader encouraged."
         )
     elif is_jewish_category and 'wisdom' in lower:
-        identity = "You are a content writer for 'The Good Shtick', a wholesome Jewish content website."
+        identity = "You are a content writer for 'Gut Shtick', a wholesome Jewish content website."
         theme = (
             "a meaningful, thought-provoking quote or short teaching of Jewish "
             "religious wisdom."
         )
     else:
-        identity = "You are a content writer for 'The Good Shtick', a wholesome, family-friendly content website."
+        identity = "You are a content writer for 'Gut Shtick', a wholesome, family-friendly content website."
         theme = (
             f"a short piece of tasteful, high-quality content that fits the "
             f"category \"{name}\". Write general-audience content that matches "

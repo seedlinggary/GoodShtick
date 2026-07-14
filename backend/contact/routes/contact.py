@@ -13,7 +13,7 @@ contact_api = Blueprint('contact_api', __name__, url_prefix='/contact')
 
 # The public-facing contact identity shown across the site (Contact.js,
 # Disclaimer.js, ContentGuidelines.js) -- this is where messages land.
-RECIPIENT = 'seedling.gary@gmail.com'
+RECIPIENT = 'orders@kolstock.com'
 
 NAME_MAX = 100
 EMAIL_MAX = 200
@@ -44,7 +44,7 @@ def send_contact_message():
     import resend
     resend.api_key = api_key
 
-    from_name = os.environ.get('EMAIL_FROM_NAME', 'The Good Shtick')
+    from_name = os.environ.get('EMAIL_FROM_NAME', 'Gut Shtick')
     from_addr = os.environ.get('EMAIL_FROM')
     if not from_addr:
         return jsonify({'message': 'Email is not configured on the server.'}), 500

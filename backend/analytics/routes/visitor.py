@@ -132,6 +132,27 @@ def beacon(current_user):
     return resp
 
 
+@analytics_api.route('/logout', methods=['POST'])
+def logout_reset():
+    """Clears the anon_id cookie on sign-out.
+
+    Without this, a browser that ever logged in keeps the SAME anon_id
+    forever (see beacon()'s backfill), so VisitorSession.user_id -- set once,
+    never cleared -- permanently misclassifies that browser as "logged in"
+    even after signing out and browsing anonymously. Dropping the cookie here
+    makes the next beacon() call mint a fresh anon_id, so genuinely anonymous
+    post-logout activity lands in a new, correctly-anonymous session row. The
+    old session row is untouched and still accurately reflects the time the
+    visitor spent logged in.
+    """
+    resp = make_response(jsonify({'message': 'ok'}))
+    if _looks_like_localhost():
+        resp.set_cookie(ANON_COOKIE_NAME, '', max_age=0, httponly=True, samesite='Lax')
+    else:
+        resp.set_cookie(ANON_COOKIE_NAME, '', max_age=0, httponly=True, samesite='None', secure=True)
+    return resp
+
+
 def _visitor_counts(days):
     cutoff = datetime.utcnow() - timedelta(days=days)
     base = VisitorSession.query.filter(

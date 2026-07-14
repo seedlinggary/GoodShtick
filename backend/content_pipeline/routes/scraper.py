@@ -41,7 +41,7 @@ robots.txt (checked 2026-07-12):
   * dansdeals -- generic "User-agent: *" gets "Allow: /" (only /wp-admin/
     blocked). NOTE: dansdeals additionally names and fully disallows several
     AI crawlers (ClaudeBot, GPTBot, CCBot, Amazonbot, Google-Extended, ...).
-    Our User-Agent is a distinct, honest "GoodShtickBot" (NOT any of those),
+    Our User-Agent is a distinct, honest "GutShtickBot" (NOT any of those),
     which falls under the permissive "*" group -- so /feed/ is allowed. The UA
     string must never be changed to impersonate one of the blocked names.
 """
@@ -70,7 +70,7 @@ scraper_api = Blueprint('scraper_api', __name__, url_prefix='/content-pipeline/s
 
 # Honest bot identity -- do NOT change to impersonate a browser or a named
 # crawler that a site's robots.txt blocks (see module docstring re: dansdeals).
-USER_AGENT = 'GoodShtickBot/1.0 (+https://thegoodshtick.com; news aggregator bot)'
+USER_AGENT = 'GutShtickBot/1.0 (+https://gutshtick.com; news aggregator bot)'
 
 DEFAULT_COUNT = 10
 MAX_COUNT = 50
