@@ -1,4 +1,9 @@
+import hashlib
+import time
+from datetime import datetime, timezone
+
 from flask import Blueprint, jsonify, request
+from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from config import db, cache
 from security import token_required, admin_required
@@ -9,6 +14,10 @@ from backend.shtick.modals.url import Url
 from backend.shtick.modals.picture import Picture
 from backend.shtick.modals.generalc import Generalc
 from backend.shtick.schemas.shtick import shtick_schema, shticks_schema, shtick_feed_schema, shticks_feed_schema
+from backend.hock.modals.hock_post import HockPost
+from backend.hock.schemas.hock import make_post_schema as make_hock_post_schema
+from backend.tachlis.modals.tachlis_post import TachlisPost
+from backend.tachlis.schemas.tachlis import make_tachlis_post_schema
 import jwt
 from backend.user.modals.user import User
 from config import application
@@ -81,6 +90,105 @@ def get_single_post(shtick_id):
 
 PAGE_SIZE = 10
 
+# ── Daily Board feed algorithm ──────────────────────────────────────────────
+# The root board ("mix=1", see get_all_approved_shtick) doesn't want a
+# perfectly frozen reverse-chronological order forever -- every visit looks
+# identical, and older-but-still-good posts have zero chance of resurfacing.
+# It also shouldn't be pure randomness -- newer posts should still generally
+# float up. The compromise: bucket candidates into recency tiers, then shuffle
+# *within* each tier using a seed tied to a rotating time window. Newer tiers
+# always sort before older ones (recency-weighted), but the exact order
+# inside a tier drifts every BOARD_BUCKET_SECONDS instead of being fixed.
+# The shuffle is a pure function of (kind, id, bucket) -- no per-request
+# randomness -- so it stays stable (and CDN/in-process cacheable) for the
+# whole bucket window, and pagination never repeats or skips an item within
+# that window.
+BOARD_BUCKET_SECONDS = 20 * 60  # how often the shuffle re-rolls
+RECENCY_TIER_HOURS = [2, 6, 24, 72]  # tier boundaries; anything older is the last tier
+HOCK_SLOT = 3      # 0-indexed position of the Hock pick within each 10-item page
+TACHLIS_SLOT = 7   # 0-indexed position of the Tachlis pick within each 10-item page
+BOARD_SHTICK_CANDIDATES = 200
+BOARD_HOCK_CANDIDATES = 40
+BOARD_TACHLIS_CANDIDATES = 30
+
+
+def _recency_tier(pub_date, now):
+    if not pub_date:
+        return len(RECENCY_TIER_HOURS)
+    age_hours = (now - pub_date).total_seconds() / 3600
+    for tier, bound in enumerate(RECENCY_TIER_HOURS):
+        if age_hours < bound:
+            return tier
+    return len(RECENCY_TIER_HOURS)
+
+
+def _shuffle_key(kind, item_id, bucket):
+    """Deterministic per-item, per-bucket pseudo-random key -- same inputs
+    always produce the same key, so the order is stable within one bucket
+    window and reshuffles cleanly once the bucket rolls over."""
+    digest = hashlib.md5(f'{kind}:{item_id}:{bucket}'.encode()).hexdigest()
+    return digest
+
+
+def _tiered_shuffle(rows, kind, now, bucket):
+    return sorted(
+        rows,
+        key=lambda row: (_recency_tier(row.pub_date, now), _shuffle_key(kind, row.id, bucket))
+    )
+
+
+def _board_feed_page(page, current_user=None):
+    """One page of the mixed, recency-weighted board feed: mostly Shtick
+    posts in tiered-shuffled order, with one Hock pick and one Tachlis pick
+    folded into fixed slots on every page so cross-pollination is a steady
+    presence rather than a one-off strip at the very top."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    bucket = int(time.time() // BOARD_BUCKET_SECONDS)
+
+    shticks = (Shtick.query
+               .options(*_feed_options())
+               .filter_by(approved_to_publish=True)
+               .order_by(Shtick.pub_date.desc())
+               .limit(BOARD_SHTICK_CANDIDATES).all())
+    shticks = _tiered_shuffle(shticks, 'shtick', now, bucket)
+
+    hock_posts = (HockPost.query
+                  .filter_by(approved_to_publish=True)
+                  .order_by(HockPost.pub_date.desc())
+                  .limit(BOARD_HOCK_CANDIDATES).all())
+    hock_posts = _tiered_shuffle(hock_posts, 'hock', now, bucket)
+
+    tachlis_posts = (TachlisPost.query
+                      .filter_by(approved_to_publish=True)
+                      .order_by(TachlisPost.pub_date.desc())
+                      .limit(BOARD_TACHLIS_CANDIDATES).all())
+    tachlis_posts = _tiered_shuffle(tachlis_posts, 'tachlis', now, bucket)
+
+    shticks_per_page = PAGE_SIZE - (1 if hock_posts else 0) - (1 if tachlis_posts else 0)
+    shtick_start = (page - 1) * shticks_per_page
+    page_shticks = shticks[shtick_start:shtick_start + shticks_per_page]
+
+    items = [('shtick', s) for s in page_shticks]
+    if hock_posts:
+        pick = hock_posts[(page - 1) % len(hock_posts)]
+        items.insert(min(HOCK_SLOT, len(items)), ('hock', pick))
+    if tachlis_posts:
+        pick = tachlis_posts[(page - 1) % len(tachlis_posts)]
+        items.insert(min(TACHLIS_SLOT, len(items)), ('tachlis', pick))
+
+    hock_schema = make_hock_post_schema(current_user, card=True)
+    tachlis_schema = make_tachlis_post_schema(current_user, card=True)
+
+    dumped = []
+    for kind, obj in items:
+        if kind == 'shtick':
+            dumped.append({'kind': 'shtick', **shtick_feed_schema.dump(obj)})
+        elif kind == 'hock':
+            dumped.append({'kind': 'hock', **hock_schema.dump(obj)})
+        else:
+            dumped.append({'kind': 'tachlis', **tachlis_schema.dump(obj)})
+    return dumped
+
 
 @shtick_api.route('/<generalc_id>/<int:page>', methods=['GET'])
 def get_all_approved_shtick(generalc_id, page):
@@ -123,6 +231,23 @@ def get_all_approved_shtick(generalc_id, page):
                    .order_by(Shtick.pub_date.desc()).all())
         return jsonify(shticks_feed_schema.dump(shticks))
 
+    # The Daily Board home feed (root only -- NOT the "/feed/all" browse-all
+    # page, which sends generalc_id='all' too but omits ?mix=1 and stays pure
+    # reverse-chronological Shtick, same as any other category). Cache key
+    # includes the shuffle bucket so a cached page never outlives its own
+    # ordering, and naturally expires right as the bucket rolls over.
+    if generalc_id == 'all' and request.args.get('mix') == '1':
+        bucket = int(time.time() // BOARD_BUCKET_SECONDS)
+        cache_key = f'feed:board:page:{page}:bucket:{bucket}'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+        items = _board_feed_page(page)
+        response = jsonify(items)
+        response.headers['Cache-Control'] = f'public, s-maxage={BOARD_BUCKET_SECONDS}, stale-while-revalidate=300'
+        cache.set(cache_key, response, timeout=BOARD_BUCKET_SECONDS)
+        return response
+
     # Public feed — cache by category + page (bounded set of keys now that
     # each page is its own entry, instead of one growing entry per cumulative limit)
     cache_key = f'feed:{generalc_id}:page:{page}'
@@ -154,6 +279,21 @@ def get_all_approved_shtick(generalc_id, page):
     response.headers['Cache-Control'] = 'public, s-maxage=60, stale-while-revalidate=300'
     cache.set(cache_key, response, timeout=60)
     return response
+
+
+@shtick_api.route('/random', methods=['GET'])
+def get_random_shtick():
+    """One random approved post -- backs the Home board's "Shake the Board"
+    button. Deliberately uncached (a cached "random" pick would just be the
+    same post over and over until the cache expired, defeating the point)."""
+    pick = (Shtick.query
+            .options(*_feed_options())
+            .filter_by(approved_to_publish=True)
+            .order_by(func.random())
+            .first())
+    if not pick:
+        return jsonify({'message': 'Nothing to shake loose yet'}), 404
+    return jsonify(shtick_feed_schema.dump(pick))
 
 
 @shtick_api.route('', methods=['POST'])

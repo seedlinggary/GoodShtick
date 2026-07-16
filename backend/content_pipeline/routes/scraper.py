@@ -1,13 +1,13 @@
 """News scraper for the SuperAdmin dashboard.
 
-A super-admin triggers a run for one of three news sites; we pull that site's
+A super-admin triggers a run for one of four sites; we pull that site's
 most-recent articles (title + short summary + link only -- never the full
 article body, so traffic flows back to the source), skip anything already
 scraped, and drop the new ones into the existing pending-approval queue as
 unapproved Shticks.
 
 Data source per site (verified 2026-07-12, israelnationalnews + yeshivaworld
-re-verified/switched later the same day):
+re-verified/switched later the same day; pzdeals added 2026-07-15):
   * israelnationalnews -- originally used /Rss.aspx ("News Briefs"), but that
     feed's <enclosure> is a static placeholder shared by every item, AND each
     brief's own og:image turned out to *also* fall back to the same generic
@@ -31,8 +31,44 @@ re-verified/switched later the same day):
     any non-browser client; the public WordPress /feed/ is served normally,
     and its RSS <description> already embeds the featured <img>, so no extra
     per-article request is needed here either.
+  * pzdeals -- a Shopify storefront, not a syndication feed. Originally read
+    the blog sitemap (/sitemap_blogs_1.xml), but as of 2026-07 that blog is
+    dead: its newest article is dated 2025-06-29, over a year stale, and half
+    of its handful of posts are literal test entries ("testing",
+    "test-blog-article", "first-post") -- pzdeals stopped announcing deals as
+    Shopify blog articles at some point and never posted again, so that feed
+    would structurally never yield anything new no matter how often it's
+    polled. This is NOT the same failure as the Cloudflare 429s below --
+    the requests succeeded fine, there was simply nothing left to find.
+    Switched to /sitemap_products_1.xml instead (confirmed live: lastmod
+    stamps are same-day), which lists the storefront's actual product
+    catalog -- title, link, and image, same shape as the old blog sitemap, so
+    the existing parser needs no changes beyond the URL. Trade-off: product
+    titles ("Marcal Recycled Roll Towels, 9 x 11 Inches...") read as plain
+    catalog listings, not deal call-outs the way the old blog article titles
+    did -- there's no way around that without price data, and pricing is out
+    of reach (see below). Only shard 1 of the 31 product sitemaps is used:
+    fetching multiple shards in one run measurably raised the Cloudflare
+    challenge rate during verification, so this deliberately stays a single
+    request per run, same as every other source here, and leans on the
+    existing duplicate-streak dedup to work through shard 1's own few
+    thousand products over many runs rather than trying to chase "newest"
+    across shards.
+    pzdeals' Cloudflare setup actively rate-limits/blocks bot requests to
+    individual page fetches -- confirmed for article pages, collection pages,
+    AND individual product pages/`.json` endpoints (all HTTP 429
+    "bot-rate-limit: enforced" or an interactive "Verifying your
+    connection..." challenge page), including on repeated attempts after
+    backing off. Sitemap files themselves are the one thing that reliably
+    isn't challenged on a fresh request, which is why this source deliberately
+    never fetches a product's own page at all -- title + image only, no
+    summary, no price, sourced entirely from the sitemap XML. Featured images
+    are hosted on cdn.shopify.com, a different, wide-open domain not subject
+    to the storefront's bot protection. `<url>` entries with no <image:image>
+    child (the bare homepage `/` entry included) are filtered out by
+    requiring an image.
 
-robots.txt (checked 2026-07-12):
+robots.txt (checked 2026-07-12; pzdeals checked 2026-07-15):
   * israelnationalnews -- the homepage (/) is not disallowed, nor are
     individual /news/<id> article links found on it (only /Controls/,
     /search, /flashes/1*-5*, /News/Section.aspx/N and /section/N -- a
@@ -44,6 +80,12 @@ robots.txt (checked 2026-07-12):
     Our User-Agent is a distinct, honest "GutShtickBot" (NOT any of those),
     which falls under the permissive "*" group -- so /feed/ is allowed. The UA
     string must never be changed to impersonate one of the blocked names.
+  * pzdeals -- "User-agent: *" explicitly allows / and /blogs/*, only
+    disallowing private/transactional paths (cart, checkout, account,
+    admin). Sitemap and product paths are equally unrestricted. The 429s
+    described above are Cloudflare bot-management rate-limiting, not a
+    robots.txt restriction, and are handled by simply never requesting
+    those pages rather than by working around the block.
 """
 import html
 import logging
@@ -230,10 +272,58 @@ def _fetch_yeshivaworld(client, count):
     return items
 
 
+# See the "pzdeals" entry in the module docstring for why this points at the
+# product catalog rather than the (dead) blog sitemap, and why it deliberately
+# stays pinned to a single shard.
+PZDEALS_SITEMAP_URL = 'https://www.pzdeals.com/sitemap_products_1.xml?from=6315627461&to=7056018437'
+
+
+def _fetch_pzdeals(client, count):
+    """pzdeals.com's product sitemap -- a Shopify storefront, not a
+    syndication feed, but the sitemap conveniently lists every product's
+    title, link, and featured image in one request. Deliberately never
+    fetches a product's own page (see module docstring: Cloudflare
+    bot-management rate-limits that specifically -- confirmed for product
+    pages too, not just the blog articles this originally targeted), so
+    there's no summary or price for this source -- title + image only.
+    `<url>` entries with no <image:image> child (the bare homepage `/`
+    entry) are skipped."""
+    resp = client.get(PZDEALS_SITEMAP_URL)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, 'xml')
+
+    items = []
+    for url_tag in soup.find_all('url'):
+        image_tag = url_tag.find('image:image')
+        if not image_tag:
+            continue
+        loc = url_tag.find('loc')
+        title_tag = image_tag.find('image:title')
+        image_loc = image_tag.find('image:loc')
+        if not (loc and title_tag and image_loc):
+            continue
+        lastmod = url_tag.find('lastmod')
+        items.append({
+            'title': html.unescape(title_tag.get_text(strip=True)),
+            'url': loc.get_text(strip=True),
+            'summary': '',
+            'image_url': image_loc.get_text(strip=True),
+            'lastmod': lastmod.get_text(strip=True) if lastmod else '',
+        })
+
+    items.sort(key=lambda it: it['lastmod'], reverse=True)
+    for it in items:
+        del it['lastmod']
+    return items[:count]
+
+
 # source key -> config. Sources with `feed` + `parser` are RSS (see module
-# docstring); israelnationalnews and yeshivaworld instead have `fetch(client,
-# count)` since they're scraped/REST, not RSS, and paginate by count rather
-# than returning a fixed-size feed.
+# docstring); israelnationalnews, yeshivaworld, and pzdeals instead have
+# `fetch(client, count)` since they're scraped/REST/sitemap, not RSS, and
+# paginate by count rather than returning a fixed-size feed. `require_image`:
+# skip the article entirely (rather than posting without a picture) when no
+# image resolves -- only pzdeals needs this since its title-only posts would
+# otherwise have nothing but a caption and a link.
 SOURCES = {
     'israelnationalnews': {
         'fetch': _fetch_israelnationalnews,
@@ -247,6 +337,11 @@ SOURCES = {
         'feed': 'https://www.dansdeals.com/feed/',
         'parser': _parse_dansdeals,
         'credit': 'DansDeals',
+    },
+    'pzdeals': {
+        'fetch': _fetch_pzdeals,
+        'credit': 'PZ Deals',
+        'require_image': True,
     },
 }
 
@@ -441,6 +536,12 @@ def run_scraper(current_user, source):
                 ))
 
                 picture_name = _resolve_image(client, art)
+                if not picture_name and cfg.get('require_image'):
+                    # This source's posts are title-only (no summary text), so
+                    # a post with no picture either would be nothing but a
+                    # caption and a link -- skip it rather than publish that.
+                    db.session.rollback()
+                    continue
                 if picture_name:
                     db.session.add(Picture(name=picture_name, shtick_id=shtick.id))
 

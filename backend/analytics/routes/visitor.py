@@ -1,5 +1,6 @@
 import random
 import secrets
+from collections import defaultdict
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
@@ -8,6 +9,7 @@ from sqlalchemy import func
 from config import cache, db
 from security import super_admin_required, token_optional
 from backend.analytics.modals.visitor import VisitorEvent, VisitorSession
+from backend.user.modals.user import User
 
 analytics_api = Blueprint('analytics_api', __name__, url_prefix='/analytics')
 
@@ -34,6 +36,20 @@ def _looks_like_localhost():
         return True
     origin = (request.headers.get('Origin') or request.headers.get('Referer') or '').lower()
     return any(h in origin for h in _LOCALHOST_HOSTS)
+
+
+def _staff_public_ids():
+    """public_ids of admin/super_admin accounts -- excluded from every visitor
+    metric below. Their own testing/moderation activity isn't real visitor
+    behavior and skewed multiple stats in practice (an 8+ hour work session
+    once dragged the average "session length" up by orders of magnitude)."""
+    return {u.public_id for u in User.query.filter(User.role.in_(('admin', 'super_admin'))).all()}
+
+
+def _exclude_staff(query, staff_ids):
+    if not staff_ids:
+        return query
+    return query.filter(db.or_(VisitorSession.user_id.is_(None), ~VisitorSession.user_id.in_(staff_ids)))
 
 
 def _maybe_cleanup():
@@ -69,21 +85,19 @@ def beacon(current_user):
     that -- this matches how the JWT auth token is already handled elsewhere
     in this app (also localStorage, not a cookie), for the same reason.
 
-    `force: true` in the JSON body is a TEST-ONLY escape hatch (see the class
-    docstring on VisitorSession / task notes) that bypasses the "don't write
-    localhost traffic" skip so the write path can be exercised from a dev
-    machine -- rows written this way are still stamped is_localhost=True, so
-    they're excluded from the real /analytics/dashboard aggregates either way.
+    No analytics are ever written when the request originates from localhost
+    -- unconditionally, no override. (An earlier version had a `force: true`
+    escape hatch for exercising the write path from a dev machine; removed
+    because any write from localhost, even one flagged and later filtered out
+    of the dashboard, was still real dev/test traffic sitting in the
+    production table.)
     """
     body = request.get_json(silent=True) or {}
-    force = bool(body.get('force'))
-
     anon_id = (body.get('anon_id') or '').strip()[:64] or secrets.token_urlsafe(32)
 
     is_localhost = _looks_like_localhost()
-    skip_write = is_localhost and not force
 
-    if not skip_write:
+    if not is_localhost:
         now = datetime.utcnow()
         country = request.headers.get('x-vercel-ip-country') or None
 
@@ -91,7 +105,6 @@ def beacon(current_user):
         if session_row:
             session_row.last_seen = now
             session_row.page_view_count = (session_row.page_view_count or 0) + 1
-            session_row.is_localhost = is_localhost
             if current_user and not session_row.user_id:
                 session_row.user_id = current_user.public_id
         else:
@@ -102,7 +115,7 @@ def beacon(current_user):
                 first_seen=now,
                 last_seen=now,
                 page_view_count=1,
-                is_localhost=is_localhost,
+                is_localhost=False,
             )
             db.session.add(session_row)
 
@@ -118,53 +131,116 @@ def beacon(current_user):
     return jsonify({'message': 'ok', 'anon_id': anon_id})
 
 
-def _visitor_counts(days):
+def _visitor_counts(days, staff_ids):
     cutoff = datetime.utcnow() - timedelta(days=days)
-    base = VisitorSession.query.filter(
+    base = _exclude_staff(VisitorSession.query.filter(
         VisitorSession.last_seen >= cutoff,
         VisitorSession.is_localhost.is_(False),
-    )
+    ), staff_ids)
     total = base.with_entities(func.count(func.distinct(VisitorSession.anonymous_id))).scalar() or 0
     logged_in = (base.filter(VisitorSession.user_id.isnot(None))
                  .with_entities(func.count(func.distinct(VisitorSession.anonymous_id))).scalar() or 0)
     return {'total': total, 'logged_in': logged_in, 'anonymous': total - logged_in}
 
 
+def _visitor_day_stats():
+    """anonymous_id -> (first-ever active date, count of distinct calendar
+    days they've been active on), across all history -- not just the current
+    window. One unified definition of "returning" is used everywhere below:
+    a visitor becomes returning the moment they show up on a 2nd distinct
+    calendar day, independent of any period boundary. (An earlier version
+    defined "returning" for the period stat tiles as "first seen before this
+    window started," which disagreed with the daily chart's "came back on a
+    later day" definition for anyone whose first-ever visit fell inside the
+    window -- same underlying data, two different day-vs-period-relative
+    definitions producing different-looking numbers side by side. This is the
+    one definition both use now.)"""
+    rows = (db.session.query(
+        VisitorEvent.anonymous_id,
+        func.min(func.date(VisitorEvent.created_at)),
+        func.count(func.distinct(func.date(VisitorEvent.created_at))))
+        .group_by(VisitorEvent.anonymous_id).all())
+    return {anon_id: (first_day, day_count) for anon_id, first_day, day_count in rows}
+
+
+def _new_vs_returning_counts(days, staff_ids, day_stats_by_id):
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    active_ids = (_exclude_staff(VisitorSession.query.filter(
+        VisitorSession.last_seen >= cutoff, VisitorSession.is_localhost.is_(False),
+    ), staff_ids)
+        .with_entities(VisitorSession.anonymous_id).distinct().all())
+    new_count = 0
+    returning_count = 0
+    for (anon_id,) in active_ids:
+        _, day_count = day_stats_by_id.get(anon_id, (None, 1))
+        if day_count >= 2:
+            returning_count += 1
+        else:
+            new_count += 1
+    return {'new': new_count, 'returning': returning_count}
+
+
+def _daily_new_vs_returning(days, staff_ids, day_stats_by_id):
+    """Per-day new/returning split for the trend chart -- for each calendar
+    day, how many distinct visitors were active, split by whether that day
+    was their first-ever active day or a later, repeat day."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    day_col = func.date(VisitorEvent.created_at)
+    pairs = (db.session.query(VisitorEvent.anonymous_id, day_col.label('day'))
+             .join(VisitorSession, VisitorSession.anonymous_id == VisitorEvent.anonymous_id)
+             .filter(VisitorEvent.created_at >= cutoff, VisitorSession.is_localhost.is_(False)))
+    if staff_ids:
+        pairs = pairs.filter(db.or_(VisitorSession.user_id.is_(None),
+                                     ~VisitorSession.user_id.in_(staff_ids)))
+    pairs = pairs.distinct().all()
+
+    daily = defaultdict(lambda: {'new': 0, 'returning': 0})
+    for anon_id, day in pairs:
+        first_day, _ = day_stats_by_id.get(anon_id, (day, 1))
+        bucket = 'new' if first_day == day else 'returning'
+        daily[str(day)][bucket] += 1
+    return [{'date': d, **counts} for d, counts in sorted(daily.items())]
+
+
 @analytics_api.route('/dashboard', methods=['GET'])
 @super_admin_required
 @cache.cached(timeout=60)
 def dashboard(_current_user):
+    staff_ids = _staff_public_ids()
+
     visitors = {
-        '7d': _visitor_counts(7),
-        '30d': _visitor_counts(30),
-        '90d': _visitor_counts(90),
+        '7d': _visitor_counts(7, staff_ids),
+        '30d': _visitor_counts(30, staff_ids),
+        '90d': _visitor_counts(90, staff_ids),
     }
 
-    avg_seconds = (db.session.query(
-        func.avg(func.extract('epoch', VisitorSession.last_seen - VisitorSession.first_seen)))
-        .filter(VisitorSession.is_localhost.is_(False))
-        .scalar())
-    # Postgres AVG(extract(epoch, ...)) comes back as a Decimal; Flask's JSON
-    # provider silently serializes Decimal as a *string*, which would make
-    # this field inconsistent with every other numeric field in the payload.
-    # Cast to float first so it round-trips as a real JSON number.
-    avg_session_minutes = round(float(avg_seconds or 0) / 60, 1)
+    avg_views = (_exclude_staff(VisitorSession.query.filter(VisitorSession.is_localhost.is_(False)), staff_ids)
+                 .with_entities(func.avg(VisitorSession.page_view_count)).scalar())
+    avg_page_views = round(float(avg_views or 0), 1)
 
-    country_rows = (db.session.query(
+    country_rows = (_exclude_staff(db.session.query(
         func.coalesce(VisitorSession.country, 'Unknown').label('country'),
         func.count(func.distinct(VisitorSession.anonymous_id)).label('visitor_count'))
-        .filter(VisitorSession.is_localhost.is_(False))
+        .filter(VisitorSession.is_localhost.is_(False)), staff_ids)
         .group_by('country')
         .order_by(func.count(func.distinct(VisitorSession.anonymous_id)).desc())
         .limit(10).all())
     top_countries = [{'country': c, 'count': n} for c, n in country_rows]
 
+    day_stats_by_id = _visitor_day_stats()
+    new_vs_returning = {
+        '7d': _new_vs_returning_counts(7, staff_ids, day_stats_by_id),
+        '30d': _new_vs_returning_counts(30, staff_ids, day_stats_by_id),
+        '90d': _new_vs_returning_counts(90, staff_ids, day_stats_by_id),
+    }
+    daily_new_vs_returning = _daily_new_vs_returning(30, staff_ids, day_stats_by_id)
+
     trend_cutoff = datetime.utcnow() - timedelta(days=30)
     day_col = func.date(VisitorSession.first_seen)
-    trend_rows = (db.session.query(
+    trend_rows = (_exclude_staff(db.session.query(
         day_col.label('day'),
         func.count(func.distinct(VisitorSession.anonymous_id)).label('new_visitors'))
-        .filter(VisitorSession.first_seen >= trend_cutoff, VisitorSession.is_localhost.is_(False))
+        .filter(VisitorSession.first_seen >= trend_cutoff, VisitorSession.is_localhost.is_(False)), staff_ids)
         .group_by('day')
         .order_by('day')
         .all())
@@ -172,7 +248,9 @@ def dashboard(_current_user):
 
     return jsonify({
         'visitors': visitors,
-        'avg_session_minutes': avg_session_minutes,
+        'avg_page_views': avg_page_views,
         'top_countries': top_countries,
         'daily_trend': daily_trend,
+        'new_vs_returning': new_vs_returning,
+        'daily_new_vs_returning': daily_new_vs_returning,
     })

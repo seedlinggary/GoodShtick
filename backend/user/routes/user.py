@@ -1,15 +1,19 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from backend.user.modals.user import User
 from backend.user.schemas.user import users_schema, user_schema
 from backend.shtick.modals.shtick import Shtick
 from backend.hock.modals.hock_post import HockPost
+from backend.analytics.modals.visitor import VisitorSession, VisitorEvent
 from config import db
 from security import token_required
 from werkzeug.security import generate_password_hash
 import uuid
+
+REGULAR_THRESHOLD_DAYS = 5
 
 user_api = Blueprint('user_api', __name__, url_prefix='/user')
 
@@ -184,6 +188,51 @@ def my_activity(current_user):
         'tachlis_posts': tachlis_posts,
         'comments': comments,
         'likes': likes,
+    })
+
+
+@user_api.route('/me/streak', methods=['GET'])
+@token_required
+def my_streak(current_user):
+    """The Profile punch card's data -- reuses the visitor-analytics tables
+    built for /analytics/dashboard rather than a separate streak system.
+    VisitorSession.user_id gets backfilled onto a visitor's session the
+    moment they're logged in during a beacon (see
+    backend/analytics/routes/visitor.py), so every distinct calendar day
+    this user was ever active on the site is already sitting in
+    VisitorEvent -- this just counts it."""
+    anon_ids = [row.anonymous_id for row in
+                VisitorSession.query.filter_by(user_id=current_user.public_id)
+                .with_entities(VisitorSession.anonymous_id).distinct().all()]
+
+    if not anon_ids:
+        return jsonify({'distinct_days': 0, 'current_streak': 0, 'is_regular': False, 'recent_days': []})
+
+    day_rows = (db.session.query(func.date(VisitorEvent.created_at))
+                .filter(VisitorEvent.anonymous_id.in_(anon_ids))
+                .distinct()
+                .order_by(func.date(VisitorEvent.created_at).desc())
+                .all())
+    active_days = [d for (d,) in day_rows]
+
+    # Consecutive-day streak counting back from today, with a one-day grace
+    # (yesterday still counts as "unbroken" if today's beacon hasn't fired
+    # yet) so the streak doesn't visibly reset the instant midnight passes.
+    today = datetime.utcnow().date()
+    streak = 0
+    cursor = today
+    active_set = set(active_days)
+    if today not in active_set:
+        cursor = today - timedelta(days=1)
+    while cursor in active_set:
+        streak += 1
+        cursor -= timedelta(days=1)
+
+    return jsonify({
+        'distinct_days': len(active_days),
+        'current_streak': streak,
+        'is_regular': len(active_days) >= REGULAR_THRESHOLD_DAYS,
+        'recent_days': [str(d) for d in active_days[:7]],
     })
 
 
