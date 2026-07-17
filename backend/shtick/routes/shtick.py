@@ -1,5 +1,6 @@
 import hashlib
 import time
+import uuid
 from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request
@@ -137,13 +138,19 @@ def _tiered_shuffle(rows, kind, now, bucket):
     )
 
 
-def _board_feed_page(page, current_user=None):
+def _board_feed_page(page, current_user=None, bucket=None):
     """One page of the mixed, recency-weighted board feed: mostly Shtick
     posts in tiered-shuffled order, with one Hock pick and one Tachlis pick
     folded into fixed slots on every page so cross-pollination is a steady
-    presence rather than a one-off strip at the very top."""
+    presence rather than a one-off strip at the very top.
+
+    `bucket` defaults to the current rotating time window, but "Shake the
+    board" (see the /shake_board route) passes an explicit random one so a
+    visitor can force a fresh reshuffle on demand instead of waiting up to
+    BOARD_BUCKET_SECONDS for the ambient one to roll over."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    bucket = int(time.time() // BOARD_BUCKET_SECONDS)
+    if bucket is None:
+        bucket = int(time.time() // BOARD_BUCKET_SECONDS)
 
     shticks = (Shtick.query
                .options(*_feed_options())
@@ -283,9 +290,13 @@ def get_all_approved_shtick(generalc_id, page):
 
 @shtick_api.route('/random', methods=['GET'])
 def get_random_shtick():
-    """One random approved post -- backs the Home board's "Shake the Board"
-    button. Deliberately uncached (a cached "random" pick would just be the
-    same post over and over until the cache expired, defeating the point)."""
+    """One random approved post. Not currently used by any UI (the Home
+    board's "Shake the Board" button used to jump straight to one of these,
+    but that read as a dead end rather than a shake -- see /shake_board,
+    which reshuffles the board you're already looking at instead). Kept as a
+    general-purpose endpoint. Deliberately uncached (a cached "random" pick
+    would just be the same post over and over until the cache expired,
+    defeating the point)."""
     pick = (Shtick.query
             .options(*_feed_options())
             .filter_by(approved_to_publish=True)
@@ -294,6 +305,21 @@ def get_random_shtick():
     if not pick:
         return jsonify({'message': 'Nothing to shake loose yet'}), 404
     return jsonify(shtick_feed_schema.dump(pick))
+
+
+@shtick_api.route('/shake_board', methods=['GET'])
+def shake_board():
+    """The Home board's "Shake the Board" button: page 1 of the mixed feed,
+    re-rolled with a fresh random shuffle bucket instead of the ambient
+    rotating one -- so a click visibly reorders what's already on screen
+    (new tiered-shuffle position within each recency band, a different
+    Hock/Tachlis pick) rather than waiting up to BOARD_BUCKET_SECONDS for
+    the natural rotation, or (the old behavior) just teleporting to one
+    unrelated post. Deliberately uncached for the same reason /random is --
+    every click should have a real chance at a different order."""
+    bucket = f'shake-{uuid.uuid4().hex}'
+    items = _board_feed_page(1, bucket=bucket)
+    return jsonify(items)
 
 
 @shtick_api.route('', methods=['POST'])

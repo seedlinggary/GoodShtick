@@ -84,6 +84,14 @@ def _existing_category_content(category_id):
     return titles, normalized
 
 
+def _is_jewish_category(category_name):
+    """Shared by the text prompt and the image prompt so the two can never
+    drift apart -- only the site's specifically Jewish/religious categories
+    (name contains "jewish" or "religious") get Jewish theming."""
+    lower = (category_name or '').strip().lower()
+    return 'jewish' in lower or 'religious' in lower
+
+
 def _system_prompt(category_name, avoid_titles=None):
     """Build the instruction prompt for one post in the given category.
 
@@ -104,10 +112,7 @@ def _system_prompt(category_name, avoid_titles=None):
     """
     name = (category_name or '').strip()
     lower = name.lower()
-    # Only the site's specifically Jewish/religious categories get Jewish
-    # theming -- require "jewish" or "religious" in the name, not just a
-    # generic word like "funny" that any unrelated category could also contain.
-    is_jewish_category = 'jewish' in lower or 'religious' in lower
+    is_jewish_category = _is_jewish_category(name)
 
     if is_jewish_category and 'funny' in lower:
         identity = "You are a content writer for 'Gut Shtick', a wholesome Jewish content website."
@@ -127,6 +132,26 @@ def _system_prompt(category_name, avoid_titles=None):
         theme = (
             "a meaningful, thought-provoking quote or short teaching of Jewish "
             "religious wisdom."
+        )
+    elif 'how to' in lower or 'how-to' in lower:
+        # The generic branch below's "family-friendly" identity line (meant as
+        # "appropriate for all ages") was apparently enough on its own, paired
+        # with an open-ended category name, to steer this toward family/
+        # parenting/holiday-planning topics almost every time -- give it a
+        # concrete, varied topic domain and an explicit steer away from that
+        # instead of leaving "How To" to guess what it means.
+        identity = "You are a content writer for 'Gut Shtick', a general-audience content website."
+        theme = (
+            "a short, practical how-to guide that teaches the reader to MAKE, "
+            "BUILD, FIX, or DO something concrete -- a real skill, task, or "
+            "project. Pick ONE specific topic from a genuinely wide range: "
+            "cooking/baking, a home or car repair, a DIY or craft project, a "
+            "money or budgeting trick, a tech or productivity tip, a fitness "
+            "or outdoor skill, a gardening task, an organizing/cleaning "
+            "method, or a useful everyday life skill. Do NOT default to "
+            "family, parenting, holiday, or event-planning topics -- those "
+            "should be rare, not the norm. Most posts should be a skill "
+            "anyone could use regardless of family situation."
         )
     else:
         identity = "You are a content writer for 'Gut Shtick', a wholesome, family-friendly content website."
@@ -205,11 +230,23 @@ def _generate_image_filename(client, title, category_name):
     returns b64_json directly, so response_format isn't a valid param for it.
     """
     try:
+        # This used to say "wholesome Jewish post" unconditionally for every
+        # category -- unlike _system_prompt's text generation, it had no
+        # is_jewish_category gate at all, so a "How To" (or "Dad Jokes",
+        # "Tech", etc.) post's illustration was still steered toward
+        # Jewish/family imagery regardless of what the post was actually
+        # about. Mirrors _system_prompt's same check now.
+        if _is_jewish_category(category_name):
+            subject = "a wholesome Jewish post"
+        else:
+            subject = f'a wholesome, general-audience post in the category "{category_name}"'
         prompt = (
-            f"A tasteful, warm, respectful illustration for a wholesome Jewish "
-            f"post titled '{title}' in the theme of '{category_name}'. "
-            f"Beautiful, uplifting, appropriate for all ages. No text, no words, "
-            f"no letters in the image."
+            f"A tasteful, warm, respectful illustration for {subject} "
+            f"titled '{title}'. Beautiful, uplifting, appropriate for all "
+            f"ages, and visually matching what the title is actually about "
+            f"-- do not add religious or Jewish imagery unless the post "
+            f"itself is Jewish-themed. No text, no words, no letters in "
+            f"the image."
         )
         img = client.images.generate(
             model="gpt-image-1",
