@@ -1,6 +1,6 @@
 import random
 import httpx
-from flask import Blueprint, jsonify, Response
+from flask import Blueprint, jsonify, Response, request
 
 media_api = Blueprint('media_api', __name__, url_prefix='/media')
 
@@ -42,3 +42,24 @@ def random_animal_image():
         except Exception:
             continue
     return jsonify({'message': 'Could not fetch an animal image right now — try again'}), 502
+
+
+@media_api.route('/tiktok-oembed', methods=['GET'])
+def tiktok_oembed():
+    """Proxies TikTok's oEmbed endpoint for ShowURL.js's TikTok embed. Same
+    reasoning as the animal endpoints above: TikTok's oEmbed doesn't send
+    Access-Control-Allow-Origin (verified directly — no such header on the
+    response), so a browser calling it straight from the frontend (the way
+    YouTube's oEmbed already works, since that one DOES allow CORS) is
+    blocked outright. Server-to-server has no such restriction. Public,
+    no auth -- this only echoes back TikTok's own public oEmbed data for a
+    URL the caller already has."""
+    url = (request.args.get('url') or '').strip()
+    if not url or 'tiktok.com' not in url:
+        return jsonify({'message': 'A tiktok.com url is required'}), 400
+    try:
+        resp = httpx.get('https://www.tiktok.com/oembed', params={'url': url}, timeout=8)
+        resp.raise_for_status()
+        return jsonify(resp.json())
+    except Exception:
+        return jsonify({'message': 'Could not fetch TikTok embed'}), 502

@@ -47,13 +47,20 @@ re-verified/switched later the same day; pzdeals added 2026-07-15):
     titles ("Marcal Recycled Roll Towels, 9 x 11 Inches...") read as plain
     catalog listings, not deal call-outs the way the old blog article titles
     did -- there's no way around that without price data, and pricing is out
-    of reach (see below). Only shard 1 of the 31 product sitemaps is used:
-    fetching multiple shards in one run measurably raised the Cloudflare
-    challenge rate during verification, so this deliberately stays a single
-    request per run, same as every other source here, and leans on the
-    existing duplicate-streak dedup to work through shard 1's own few
-    thousand products over many runs rather than trying to chase "newest"
-    across shards.
+    of reach (see below). Originally pinned to shard 1 of the (then) 31
+    product sitemaps, reasoning that fetching multiple shards in one run
+    measurably raised the Cloudflare challenge rate during verification --
+    but a pinned shard number goes stale as Shopify appends new products to
+    the newest shard and the catalog grows past whichever one is hardcoded:
+    confirmed 2026-07-21, shard 1 had grown fully exhausted (every one of
+    its ~40 image-tagged entries already scraped) while the live catalog had
+    grown to 129 shards, 128 of them never once fetched. Now discovers the
+    current newest shard(s) from the sitemap index every run instead (see
+    `_pzdeals_latest_sitemap_urls`) -- confirmed via direct fetch that this
+    doesn't reproduce the earlier Cloudflare challenge issue, and the newest
+    shard alone is sometimes too thin right after a rollover (28 products
+    seen on the newest shard at time of fix), so the 2 newest shards are
+    fetched and combined.
     pzdeals' Cloudflare setup actively rate-limits/blocks bot requests to
     individual page fetches -- confirmed for article pages, collection pages,
     AND individual product pages/`.json` endpoints (all HTTP 429
@@ -273,9 +280,36 @@ def _fetch_yeshivaworld(client, count):
 
 
 # See the "pzdeals" entry in the module docstring for why this points at the
-# product catalog rather than the (dead) blog sitemap, and why it deliberately
-# stays pinned to a single shard.
-PZDEALS_SITEMAP_URL = 'https://www.pzdeals.com/sitemap_products_1.xml?from=6315627461&to=7056018437'
+# product catalog rather than the (dead) blog sitemap. Shopify shards the
+# product sitemap into numbered pages by product-ID range, and NEW products
+# always land on the highest-numbered (newest) page -- a page number pinned
+# here would go stale as the catalog grows past it (confirmed: this used to
+# point at page 1 specifically, which was fine when that was the only/newest
+# page, but the live catalog has since grown to 129 pages, leaving page 1
+# entirely exhausted -- every one of its ~40 image-tagged entries already
+# scraped, so the scraper kept truthfully reporting "0 new" forever even
+# though 128 newer pages full of unscraped products existed). Discover the
+# current newest page from the index every run instead of hardcoding one.
+PZDEALS_SITEMAP_INDEX_URL = 'https://www.pzdeals.com/sitemap.xml'
+_PZDEALS_PAGE_NUM_RE = re.compile(r'sitemap_products_(\d+)\.xml')
+
+
+def _pzdeals_latest_sitemap_urls(client, n=2):
+    """Return the `n` highest-numbered (newest) product-sitemap page URLs
+    from the index, excluding the /es/ locale duplicate catalog. Grabbing
+    more than just the single newest page gives headroom right after the
+    catalog rolls over to a fresh page (which starts out thin)."""
+    resp = client.get(PZDEALS_SITEMAP_INDEX_URL)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, 'xml')
+    pages = []
+    for loc in soup.find_all('loc'):
+        url = loc.get_text(strip=True)
+        m = _PZDEALS_PAGE_NUM_RE.search(url)
+        if m and '/es/' not in url:
+            pages.append((int(m.group(1)), url))
+    pages.sort(key=lambda p: p[0])
+    return [url for _, url in pages[-n:]]
 
 
 def _fetch_pzdeals(client, count):
@@ -288,33 +322,51 @@ def _fetch_pzdeals(client, count):
     there's no summary or price for this source -- title + image only.
     `<url>` entries with no <image:image> child (the bare homepage `/`
     entry) are skipped."""
-    resp = client.get(PZDEALS_SITEMAP_URL)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, 'xml')
-
     items = []
-    for url_tag in soup.find_all('url'):
-        image_tag = url_tag.find('image:image')
-        if not image_tag:
-            continue
-        loc = url_tag.find('loc')
-        title_tag = image_tag.find('image:title')
-        image_loc = image_tag.find('image:loc')
-        if not (loc and title_tag and image_loc):
-            continue
-        lastmod = url_tag.find('lastmod')
-        items.append({
-            'title': html.unescape(title_tag.get_text(strip=True)),
-            'url': loc.get_text(strip=True),
-            'summary': '',
-            'image_url': image_loc.get_text(strip=True),
-            'lastmod': lastmod.get_text(strip=True) if lastmod else '',
-        })
+    for page_url in _pzdeals_latest_sitemap_urls(client):
+        resp = client.get(page_url)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, 'xml')
+
+        for url_tag in soup.find_all('url'):
+            image_tag = url_tag.find('image:image')
+            if not image_tag:
+                continue
+            loc = url_tag.find('loc')
+            title_tag = image_tag.find('image:title')
+            image_loc = image_tag.find('image:loc')
+            if not (loc and title_tag and image_loc):
+                continue
+            lastmod = url_tag.find('lastmod')
+            items.append({
+                'title': html.unescape(title_tag.get_text(strip=True)),
+                'url': loc.get_text(strip=True),
+                'summary': '',
+                'image_url': image_loc.get_text(strip=True),
+                'lastmod': lastmod.get_text(strip=True) if lastmod else '',
+            })
 
     items.sort(key=lambda it: it['lastmod'], reverse=True)
     for it in items:
         del it['lastmod']
-    return items[:count]
+
+    # Unlike an RSS feed's true chronological order (where hitting
+    # DUPLICATE_STREAK_LIMIT duplicates in a row reliably means "caught up
+    # to what we scraped last time"), this sitemap's lastmod reflects
+    # whenever Shopify last touched a product record (price/inventory sync,
+    # etc.), not when it was listed -- so already-scraped and not-yet-scraped
+    # products end up interleaved, sometimes with long runs of duplicates
+    # before the next genuinely new one. Verified directly: a run once found
+    # the first 35 consecutive items here were all already-scraped, with 15
+    # new ones sitting right after -- a count=10 cap (this function used to
+    # just return items[:count], same as every other source) never gave the
+    # caller's dedup loop a chance to see past that wall at all, silently
+    # reporting zero new articles added no matter how the source's own
+    # DUPLICATE_STREAK_LIMIT was tuned. Return a much larger candidate pool
+    # instead (cheap -- already fully parsed in memory, no extra requests);
+    # the caller's own `added >= count` check still caps how many actually
+    # get created.
+    return items[:max(count + 150, 200)]
 
 
 # source key -> config. Sources with `feed` + `parser` are RSS (see module
@@ -342,6 +394,10 @@ SOURCES = {
         'fetch': _fetch_pzdeals,
         'credit': 'PZ Deals',
         'require_image': True,
+        # See _fetch_pzdeals's docstring -- this source's sitemap can bury
+        # new products behind long runs of already-scraped ones, so the
+        # global (feed-tuned) limit gives up far too early here.
+        'duplicate_streak_limit': 60,
     },
 }
 
@@ -493,6 +549,13 @@ def run_scraper(current_user, source):
             checked = 0
             duplicate_streak = 0
             stopped_reason = 'no_more_articles'
+            # Per-source override -- see pzdeals' SOURCES entry: unlike an
+            # RSS feed's true chronological order, this source's sitemap can
+            # interleave already-scraped and new products in long runs
+            # (confirmed: 35 consecutive duplicates before the next new
+            # item), so the global limit tuned for feed sources would give
+            # up long before reaching them.
+            streak_limit = cfg.get('duplicate_streak_limit', DUPLICATE_STREAK_LIMIT)
 
             for art in articles:
                 checked += 1
@@ -506,7 +569,7 @@ def run_scraper(current_user, source):
                 existing = ScrapedArticle.query.filter_by(source=source, url=link).first()
                 if existing is not None:
                     duplicate_streak += 1
-                    if duplicate_streak >= DUPLICATE_STREAK_LIMIT:
+                    if duplicate_streak >= streak_limit:
                         stopped_reason = 'duplicate_limit'
                         break
                     continue

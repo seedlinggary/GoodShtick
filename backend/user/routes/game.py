@@ -29,6 +29,11 @@ VALID_GAMES = {
     # nostalgic arcade
     'pinball', 'tetris', 'pacman', 'bubble_trouble', 'breakout',
     'space_invaders', 'frogger', 'asteroids', 'missile_command', 'tank_duel',
+    # daily challenges + endless arcade (added for retention: date-seeded
+    # daily puzzles shared by everyone, plus a pure high-score chaser)
+    'categories', 'trivia_rush', 'bagel_flight',
+    # Survival tab -- infinite deckbuilder roguelikes, scored by level reached
+    'the_ascent',
 }
 VALID_RESULTS = {'win', 'loss', 'win_with_hint'}
 VALID_DIFFICULTIES = {'easy', 'medium', 'hard'}
@@ -75,7 +80,14 @@ def get_leaderboard(game_type):
     except (TypeError, ValueError):
         limit = 20
 
-    filters = [GameScore.game_type == game_type, GameScore.result.in_(['win', 'win_with_hint'])]
+    # Rank by score > 0, not win/loss -- every "endless" arcade game (Snake,
+    # Breakout, Bagel Flight, ...) always ends in a loss by convention (there
+    # is no win condition, only "how far did you get"), each posting its
+    # meaningful score alongside that loss. Filtering to wins only meant
+    # every one of those games' leaderboards was silently empty forever.
+    # Win/lose puzzle games (Wordle, Minesweeper, ...) already post score=0
+    # on a loss, so this filter still excludes those the same as before.
+    filters = [GameScore.game_type == game_type, GameScore.score > 0]
     if period in PERIOD_DAYS:
         filters.append(GameScore.pub_date >= datetime.utcnow() - timedelta(days=PERIOD_DAYS[period]))
 
@@ -124,7 +136,7 @@ def get_all_top3_leaderboards():
             func.sum(GameScore.score).label('total'),
             func.count(GameScore.id).label('games'),
         )
-        .filter(GameScore.result.in_(['win', 'win_with_hint']))
+        .filter(GameScore.score > 0)
         .group_by(GameScore.game_type, GameScore.user_id)
         .subquery()
     )

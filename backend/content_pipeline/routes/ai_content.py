@@ -17,6 +17,7 @@ import re
 import tempfile
 import uuid
 
+import httpx
 from flask import Blueprint, jsonify, request
 
 from config import db
@@ -25,6 +26,7 @@ from backend.shtick.modals.shtick import Shtick
 from backend.shtick.modals.content import Content
 from backend.shtick.modals.picture import Picture
 from backend.shtick.modals.generalc import Generalc
+from backend.content_pipeline.routes.scraper import _download_and_store_image
 from upload import _get_bucket
 
 logger = logging.getLogger(__name__)
@@ -219,16 +221,63 @@ def _generate_one(client, category_name, avoid_titles=None):
     return title[:CAPTION_MAX], body, source[:CREDIT_MAX]
 
 
-def _generate_image_filename(client, title, category_name):
-    """Generate an AI image for the post, upload it to Supabase, return the
-    stored filename (uuid.png). Returns None on any failure — an image is a
-    nice-to-have and must never sink the whole post.
+PEXELS_SEARCH_URL = 'https://api.pexels.com/v1/search'
 
-    Uses gpt-image-1, not dall-e-3: this OpenAI account's images endpoint no
-    longer has dall-e-3 available (verified 2026-07-12 — client.models.list()
-    only returns the gpt-image-* family for this key), and gpt-image-1 always
-    returns b64_json directly, so response_format isn't a valid param for it.
+
+def _get_pexels_api_key():
+    key = os.environ.get('PEXELS_API_KEY')
+    return key.strip() if key else None
+
+
+def _search_pexels_photo_url(http_client, query):
+    """One real photo matching `query` via Pexels' free API (no cost, no
+    per-request billing, ~no rate-limit concerns at this volume). Returns a
+    direct image URL, or None on a missing key / no results / any failure --
+    an image is always optional, never worth sinking a post over."""
+    api_key = _get_pexels_api_key()
+    if not api_key:
+        return None
+    try:
+        resp = http_client.get(
+            PEXELS_SEARCH_URL,
+            headers={'Authorization': api_key},
+            params={'query': query, 'per_page': 1},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        photos = (resp.json() or {}).get('photos') or []
+        if not photos:
+            return None
+        src = photos[0].get('src') or {}
+        return src.get('large') or src.get('original')
+    except Exception as exc:  # noqa: BLE001 -- image is optional, log and skip
+        logger.warning('Pexels search failed for %r: %s', query, exc)
+        return None
+
+
+def _generate_image_filename(openai_client, http_client, title, category_name):
+    """Get an image for the post, upload it to Supabase, return the stored
+    filename. Returns None on any failure — an image is a nice-to-have and
+    must never sink the whole post.
+
+    Tries a real photo from Pexels first for anything that isn't Jewish-
+    themed (a search on the post's own title) -- a real, specific photograph
+    reads as far less "generic" than another AI illustration for something
+    like "How To" or "Fun Facts", and it's free. Only falls back to AI
+    generation (gpt-image-1) if Pexels has no key configured, finds nothing
+    for that title, or the source category IS Jewish-themed (where a
+    generated illustration can actually match the content better than
+    whatever stock photography happens to exist for it).
     """
+    if not _is_jewish_category(category_name):
+        photo_url = _search_pexels_photo_url(http_client, title)
+        if photo_url:
+            stored = _download_and_store_image(http_client, photo_url)
+            if stored:
+                return stored
+        # Falls through to AI generation below if Pexels had no key, no
+        # match, or the download/upload failed.
+
     try:
         # This used to say "wholesome Jewish post" unconditionally for every
         # category -- unlike _system_prompt's text generation, it had no
@@ -248,7 +297,7 @@ def _generate_image_filename(client, title, category_name):
             f"itself is Jewish-themed. No text, no words, no letters in "
             f"the image."
         )
-        img = client.images.generate(
+        img = openai_client.images.generate(
             model="gpt-image-1",
             prompt=prompt,
             size="1024x1024",
@@ -326,65 +375,68 @@ def generate(current_user):
     # not just within this one.
     known_titles, known_normalized = _existing_category_content(category.id)
 
-    for i in range(count):
-        title = text = source = None
-        for attempt in range(MAX_DEDUP_ATTEMPTS):
+    # One shared client for every Pexels search + image download in this
+    # batch, instead of opening a fresh connection per post.
+    with httpx.Client(timeout=20) as http_client:
+        for i in range(count):
+            title = text = source = None
+            for attempt in range(MAX_DEDUP_ATTEMPTS):
+                try:
+                    candidate_title, candidate_text, candidate_source = _generate_one(
+                        client, category.name, avoid_titles=known_titles[:DEDUP_PROMPT_SAMPLE]
+                    )
+                except Exception as exc:  # noqa: BLE001 — one bad post shouldn't kill the batch
+                    logger.warning('AI post generation failed (%d/%d, attempt %d): %s',
+                                    i + 1, count, attempt + 1, exc)
+                    continue
+                if _is_near_duplicate(candidate_title, candidate_text, known_normalized):
+                    logger.info('Discarding near-duplicate AI post (%d/%d, attempt %d): %s',
+                                i + 1, count, attempt + 1, candidate_title)
+                    duplicates_skipped += 1
+                    continue
+                title, text, source = candidate_title, candidate_text, candidate_source
+                break
+
+            if title is None:
+                failed += 1
+                continue
+
+            # Track it immediately so later slots in *this* batch also avoid it,
+            # not just posts from before the batch started.
+            known_titles.insert(0, title)
+            known_normalized.append(_normalize_for_dedup(f'{title} {text}'))
+
             try:
-                candidate_title, candidate_text, candidate_source = _generate_one(
-                    client, category.name, avoid_titles=known_titles[:DEDUP_PROMPT_SAMPLE]
+                picture_name = None
+                if include_image:
+                    picture_name = _generate_image_filename(client, http_client, title, category.name)
+
+                new_shtick = Shtick(
+                    caption=title,
+                    credit=source,
+                    specific_category=None,
+                    user_id=current_user.public_id,
+                    generalc_id=category.id,
                 )
-            except Exception as exc:  # noqa: BLE001 — one bad post shouldn't kill the batch
-                logger.warning('AI post generation failed (%d/%d, attempt %d): %s',
-                                i + 1, count, attempt + 1, exc)
+                # approved_to_publish intentionally left as its default (None) so the
+                # post lands in the pending-approval queue.
+                db.session.add(new_shtick)
+                db.session.flush()  # need new_shtick.id for the child rows
+
+                if category not in new_shtick.categories:
+                    new_shtick.categories.append(category)
+
+                db.session.add(Content(stuff=text, shtick_id=new_shtick.id))
+                if picture_name:
+                    db.session.add(Picture(name=picture_name, shtick_id=new_shtick.id))
+
+                db.session.commit()  # commit per-post so a later failure never rolls back earlier work
+                created += 1
+            except Exception as exc:  # noqa: BLE001
+                db.session.rollback()
+                failed += 1
+                logger.warning('Persisting AI post failed (%d/%d): %s', i + 1, count, exc)
                 continue
-            if _is_near_duplicate(candidate_title, candidate_text, known_normalized):
-                logger.info('Discarding near-duplicate AI post (%d/%d, attempt %d): %s',
-                            i + 1, count, attempt + 1, candidate_title)
-                duplicates_skipped += 1
-                continue
-            title, text, source = candidate_title, candidate_text, candidate_source
-            break
-
-        if title is None:
-            failed += 1
-            continue
-
-        # Track it immediately so later slots in *this* batch also avoid it,
-        # not just posts from before the batch started.
-        known_titles.insert(0, title)
-        known_normalized.append(_normalize_for_dedup(f'{title} {text}'))
-
-        try:
-            picture_name = None
-            if include_image:
-                picture_name = _generate_image_filename(client, title, category.name)
-
-            new_shtick = Shtick(
-                caption=title,
-                credit=source,
-                specific_category=None,
-                user_id=current_user.public_id,
-                generalc_id=category.id,
-            )
-            # approved_to_publish intentionally left as its default (None) so the
-            # post lands in the pending-approval queue.
-            db.session.add(new_shtick)
-            db.session.flush()  # need new_shtick.id for the child rows
-
-            if category not in new_shtick.categories:
-                new_shtick.categories.append(category)
-
-            db.session.add(Content(stuff=text, shtick_id=new_shtick.id))
-            if picture_name:
-                db.session.add(Picture(name=picture_name, shtick_id=new_shtick.id))
-
-            db.session.commit()  # commit per-post so a later failure never rolls back earlier work
-            created += 1
-        except Exception as exc:  # noqa: BLE001
-            db.session.rollback()
-            failed += 1
-            logger.warning('Persisting AI post failed (%d/%d): %s', i + 1, count, exc)
-            continue
 
     return jsonify({
         'created': created,
