@@ -37,6 +37,7 @@ class BusinessCardSchema(Schema):
     rating_count = fields.Int()
     is_claimed = fields.Bool()
     imported = fields.Bool()
+    types = fields.Method('get_types')
     primary_location = fields.Method('get_primary_location')
 
     def get_logo_url(self, obj):
@@ -44,6 +45,9 @@ class BusinessCardSchema(Schema):
 
     def get_is_food(self, obj):
         return obj.category in FOOD_CATEGORIES
+
+    def get_types(self, obj):
+        return (obj.attributes or {}).get('types') or []
 
     def get_primary_location(self, obj):
         if not obj.locations:
