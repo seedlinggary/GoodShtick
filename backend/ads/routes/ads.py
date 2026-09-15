@@ -17,7 +17,8 @@ ads_api = Blueprint('ads_api', __name__, url_prefix='/ads')
 
 VALID_STATUSES = {'draft', 'active', 'paused', 'archived'}
 VALID_DESTINATION_TYPES = {'url', 'whatsapp', 'phone', 'email', 'internal'}
-VALID_PLACEMENTS = {'feed', 'games_hub', 'game_page', 'top', 'bottom', 'sidebar_left', 'sidebar_right'}
+VALID_PLACEMENTS = {'feed', 'games_hub', 'game_page', 'top', 'bottom', 'sidebar_left', 'sidebar_right',
+                     'business_directory', 'deals_feed'}
 VALID_GENDERS = {'male', 'female', 'other'}
 
 

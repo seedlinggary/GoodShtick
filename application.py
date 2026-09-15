@@ -23,6 +23,11 @@ from backend.content_pipeline.routes.youtube import youtube_api
 from backend.contact.routes.contact import contact_api
 from backend.tachlis.routes.tachlis_post import tachlis_api
 from backend.analytics.routes.visitor import analytics_api
+from backend.user.routes.sso import sso_api
+from backend.business.routes.business import business_api
+from backend.business.routes.business_post import business_post_api
+from backend.business.routes.business_rating import business_rating_api
+from backend.business.routes.business_comment import business_comment_api
 
 # Models — imported so SQLAlchemy's mapper registry can resolve string-based
 # relationship() references, and so Flask-Migrate autogenerate sees them.
@@ -46,6 +51,11 @@ from backend.content_pipeline.modals.scraped_article import ScrapedArticle
 from backend.content_pipeline.modals.youtube_channel import YoutubeChannel, YoutubeVideoPost
 from backend.tachlis.modals.tachlis_post import TachlisPost
 from backend.analytics.modals.visitor import VisitorSession, VisitorEvent
+from backend.business.modals.business import Business, BusinessLocation
+from backend.business.modals.business_claim import BusinessClaim
+from backend.business.modals.business_post import BusinessPost
+from backend.business.modals.business_rating import BusinessRating
+from backend.business.modals.business_comment import BusinessComment
 
 application.register_blueprint(user_api)
 application.register_blueprint(admin_api)
@@ -65,6 +75,11 @@ application.register_blueprint(youtube_api)
 application.register_blueprint(contact_api)
 application.register_blueprint(tachlis_api)
 application.register_blueprint(analytics_api)
+application.register_blueprint(sso_api)
+application.register_blueprint(business_api)
+application.register_blueprint(business_post_api)
+application.register_blueprint(business_rating_api)
+application.register_blueprint(business_comment_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold
