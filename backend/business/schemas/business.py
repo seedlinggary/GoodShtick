@@ -2,6 +2,7 @@ from marshmallow import Schema, fields
 
 from backend.shtick.schemas.shtick import UserPublicSchema
 from backend.business.modals.business import FOOD_CATEGORIES
+from backend.business.social.holidays import auto_closure_reason
 from upload import get_public_url
 
 
@@ -22,6 +23,12 @@ class LocationSchema(Schema):
     kashrut = fields.Str(allow_none=True)
     attributes = fields.Raw(allow_none=True)
     is_primary = fields.Bool()
+    holiday_closed_reason = fields.Method('get_holiday_closed_reason')
+
+    def get_holiday_closed_reason(self, obj):
+        if not (obj.attributes or {}).get('auto_holiday_closure'):
+            return None
+        return auto_closure_reason()
 
 
 class BusinessCardSchema(Schema):
@@ -38,6 +45,7 @@ class BusinessCardSchema(Schema):
     is_claimed = fields.Bool()
     imported = fields.Bool()
     types = fields.Method('get_types')
+    is_boosted = fields.Method('get_is_boosted')
     primary_location = fields.Method('get_primary_location')
 
     def get_logo_url(self, obj):
@@ -48,6 +56,10 @@ class BusinessCardSchema(Schema):
 
     def get_types(self, obj):
         return (obj.attributes or {}).get('types') or []
+
+    def get_is_boosted(self, obj):
+        from datetime import datetime
+        return bool(obj.boost_until and obj.boost_until > datetime.utcnow())
 
     def get_primary_location(self, obj):
         if not obj.locations:
@@ -80,6 +92,18 @@ class BusinessSchema(Schema):
     locations = fields.List(fields.Nested(LocationSchema))
     my_claim_status = fields.Method('get_my_claim_status')
     my_rating = fields.Method('get_my_rating')
+    google_review_url = fields.Method('get_google_review_url')
+    referral_reward = fields.Method('get_referral_reward')
+    loyalty_enabled = fields.Method('get_loyalty_enabled')
+
+    def get_google_review_url(self, obj):
+        return (obj.attributes or {}).get('google_review_url')
+
+    def get_referral_reward(self, obj):
+        return (obj.attributes or {}).get('referral_reward')
+
+    def get_loyalty_enabled(self, obj):
+        return bool((obj.attributes or {}).get('loyalty_enabled'))
 
     def get_logo_url(self, obj):
         return get_public_url(obj.logo) if obj.logo else None
@@ -139,6 +163,7 @@ class RatingSchema(Schema):
     user = fields.Nested(UserPublicSchema)
     stars = fields.Int()
     review_text = fields.Str(allow_none=True)
+    verified = fields.Bool()
     created_at = fields.DateTime()
     updated_at = fields.DateTime()
 

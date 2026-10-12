@@ -28,6 +28,19 @@ from backend.business.routes.business import business_api
 from backend.business.routes.business_post import business_post_api
 from backend.business.routes.business_rating import business_rating_api
 from backend.business.routes.business_comment import business_comment_api
+from backend.business.routes.social import social_api
+from backend.business.routes.business_analytics import business_analytics_api
+from backend.business.routes.business_redemption import redemption_api
+from backend.business.routes.business_follow import follow_api
+from backend.business.routes.business_lead import lead_api
+from backend.business.routes.business_question import question_api
+from backend.business.routes.business_referral import referral_api
+from backend.business.routes.business_owner_tools import owner_tools_api
+from backend.business.routes.business_feedback import feedback_api
+from backend.business.routes.loyalty_card import loyalty_api
+from backend.business.routes.business_referral_code import referral_code_api
+from backend.business.routes.business_insights import insights_api
+from backend.business.routes.admin_integrations import admin_integrations_api
 
 # Models — imported so SQLAlchemy's mapper registry can resolve string-based
 # relationship() references, and so Flask-Migrate autogenerate sees them.
@@ -56,6 +69,17 @@ from backend.business.modals.business_claim import BusinessClaim
 from backend.business.modals.business_post import BusinessPost
 from backend.business.modals.business_rating import BusinessRating
 from backend.business.modals.business_comment import BusinessComment
+from backend.business.modals.social_account import SocialAccount
+from backend.business.modals.social_post import SocialPost, SocialPostTarget
+from backend.business.modals.business_redemption import BusinessRedemption
+from backend.business.modals.business_follow import BusinessFollow
+from backend.business.modals.business_lead import BusinessLead
+from backend.business.modals.business_question import BusinessQuestion
+from backend.business.modals.business_referral import BusinessReferralPost, BusinessReferralReply
+from backend.business.modals.business_feedback import BusinessFeedback
+from backend.business.modals.loyalty_card import LoyaltyCard
+from backend.business.modals.business_referral_code import BusinessReferral, BusinessReferralUse
+from backend.business.modals.platform_credential import PlatformCredential
 
 application.register_blueprint(user_api)
 application.register_blueprint(admin_api)
@@ -80,6 +104,19 @@ application.register_blueprint(business_api)
 application.register_blueprint(business_post_api)
 application.register_blueprint(business_rating_api)
 application.register_blueprint(business_comment_api)
+application.register_blueprint(social_api)
+application.register_blueprint(business_analytics_api)
+application.register_blueprint(redemption_api)
+application.register_blueprint(follow_api)
+application.register_blueprint(lead_api)
+application.register_blueprint(question_api)
+application.register_blueprint(referral_api)
+application.register_blueprint(owner_tools_api)
+application.register_blueprint(feedback_api)
+application.register_blueprint(loyalty_api)
+application.register_blueprint(referral_code_api)
+application.register_blueprint(insights_api)
+application.register_blueprint(admin_integrations_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold

@@ -65,6 +65,12 @@ class Business(db.Model):
     # doesn't warrant its own column yet (e.g. delivery, wifi, parking).
     attributes = db.Column(db.JSON, nullable=True)
 
+    # Set when an owner activates "boosted placement" (earned by completing
+    # their profile, see routes/business_owner_tools.py) -- while in the
+    # future this points, list_businesses sorts the business to the top of
+    # its category/search regardless of the requested sort.
+    boost_until = db.Column(db.DateTime, nullable=True, index=True)
+
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
     owner = db.relationship('User', foreign_keys=[owner_user_id],

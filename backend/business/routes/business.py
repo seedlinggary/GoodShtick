@@ -15,13 +15,15 @@ from backend.business.modals.business_post import BusinessPost
 from backend.business.modals.business_comment import BusinessComment
 from backend.business.schemas.business import make_business_schema, make_comment_schema, ClaimSchema
 from backend.business.schemas.business_post import make_business_post_schema
+from backend.business.social.holidays import auto_closure_reason
+from backend.business.routes.social import maybe_publish_due_posts
 
 RECENT_POSTS_LIMIT = 5
 RECENT_COMMENTS_LIMIT = 10
 
 business_api = Blueprint('business_api', __name__, url_prefix='/business')
 
-PAGE_SIZE = 20
+PAGE_SIZE = 40
 CANDIDATE_CAP = 500  # see list_businesses(): only used when a Python-side filter (kashrut/open_now) applies
 NAME_MAX = 150
 ABOUT_MAX = 4000
@@ -54,6 +56,8 @@ def _location_open_now(loc):
     """Best-effort: hours are stored without a timezone, so this compares
     against server (UTC) time. Good enough for a v1 'open now' badge/filter;
     a real per-location timezone can be added to `attributes` later."""
+    if (loc.attributes or {}).get('auto_holiday_closure') and auto_closure_reason():
+        return False
     if not loc.hours:
         return False
     weekday = WEEKDAYS[datetime.utcnow().weekday()]
@@ -125,24 +129,60 @@ def business_stats():
     "trust bar" (see StatsBar.js) -- distinct cities/countries come from
     BusinessLocation since a single Business can have several locations.
     Cheap enough to run on every page load (a handful of COUNT/COUNT DISTINCT
-    queries); revisit with caching if that ever stops being true."""
-    total_businesses = db.session.query(func.count(Business.id)).scalar() or 0
-    total_cities = (db.session.query(func.count(func.distinct(
-        func.lower(BusinessLocation.city))))
-        .filter(BusinessLocation.city.isnot(None), BusinessLocation.city != '')
-        .scalar() or 0)
-    total_countries = (db.session.query(func.count(func.distinct(
-        func.lower(BusinessLocation.country))))
-        .filter(BusinessLocation.country.isnot(None), BusinessLocation.country != '')
-        .scalar() or 0)
-    total_categories = (db.session.query(func.count(func.distinct(Business.category)))
-                         .scalar() or 0)
-    total_claimed = (db.session.query(func.count(Business.id))
-                      .filter(Business.owner_user_id.isnot(None)).scalar() or 0)
-    total_kosher_locations = (db.session.query(func.count(BusinessLocation.id))
-                               .filter(BusinessLocation.kashrut.isnot(None), BusinessLocation.kashrut != '')
-                               .scalar() or 0)
-    total_deals = db.session.query(func.count(BusinessPost.id)).scalar() or 0
+    queries); revisit with caching if that ever stops being true.
+
+    `categories`/`exclude_categories` (comma-separated) scope every count to
+    just those businesses -- the Directory sends exclude_categories=shul,
+    nonprofit so its trust bar doesn't count the Community area's listings,
+    and the Community page sends categories=shul,nonprofit for its own."""
+    categories = [c.strip().lower() for c in (request.args.get('categories') or '').split(',') if c.strip()]
+    exclude_categories = [c.strip().lower() for c in (request.args.get('exclude_categories') or '').split(',') if c.strip()]
+
+    def _scoped(query, business_id_col):
+        if categories:
+            query = query.filter(business_id_col.in_(
+                db.session.query(Business.id).filter(Business.category.in_(categories))))
+        if exclude_categories:
+            query = query.filter(business_id_col.in_(
+                db.session.query(Business.id).filter(Business.category.notin_(exclude_categories))))
+        return query
+
+    business_query = db.session.query(Business.id)
+    if categories:
+        business_query = business_query.filter(Business.category.in_(categories))
+    if exclude_categories:
+        business_query = business_query.filter(Business.category.notin_(exclude_categories))
+
+    total_businesses = business_query.count()
+    total_cities = _scoped(
+        db.session.query(func.count(func.distinct(func.lower(BusinessLocation.city))))
+        .filter(BusinessLocation.city.isnot(None), BusinessLocation.city != ''),
+        BusinessLocation.business_id,
+    ).scalar() or 0
+    total_countries = _scoped(
+        db.session.query(func.count(func.distinct(func.lower(BusinessLocation.country))))
+        .filter(BusinessLocation.country.isnot(None), BusinessLocation.country != ''),
+        BusinessLocation.business_id,
+    ).scalar() or 0
+    total_categories_query = db.session.query(func.count(func.distinct(Business.category)))
+    if categories:
+        total_categories_query = total_categories_query.filter(Business.category.in_(categories))
+    if exclude_categories:
+        total_categories_query = total_categories_query.filter(Business.category.notin_(exclude_categories))
+    total_categories = total_categories_query.scalar() or 0
+    total_claimed = db.session.query(func.count(Business.id)).filter(
+        Business.owner_user_id.isnot(None),
+        *([Business.category.in_(categories)] if categories else []),
+        *([Business.category.notin_(exclude_categories)] if exclude_categories else []),
+    ).scalar() or 0
+    total_kosher_locations = _scoped(
+        db.session.query(func.count(BusinessLocation.id))
+        .filter(BusinessLocation.kashrut.isnot(None), BusinessLocation.kashrut != ''),
+        BusinessLocation.business_id,
+    ).scalar() or 0
+    total_deals = _scoped(
+        db.session.query(func.count(BusinessPost.id)), BusinessPost.business_id,
+    ).scalar() or 0
 
     return jsonify({
         'businesses': total_businesses,
@@ -162,8 +202,19 @@ def list_businesses(current_user):
     popular businesses surface -- unless ?sort=alpha or ?sort=rating.
     Filters: category, city, q (name/about/city/address), food_only,
     kashrut_only, open_now, and a lat/lng bounding box for the map
-    (north/south/east/west, all required together)."""
+    (north/south/east/west, all required together).
+
+    `categories` (comma-separated) and `exclude_categories` (comma-separated)
+    are the multi-category siblings of `category` -- used to carve out the
+    Community area (shuls, chessed organizations) from the regular Business
+    directory: the Directory always sends `exclude_categories=shul,nonprofit`
+    so those never show there, and the Community page sends
+    `categories=shul,nonprofit` to show only them. Both can combine with a
+    single `category` chip within their own page (e.g. Community filtering
+    down to just Shul)."""
     category = (request.args.get('category') or '').strip().lower()
+    categories = [c.strip().lower() for c in (request.args.get('categories') or '').split(',') if c.strip()]
+    exclude_categories = [c.strip().lower() for c in (request.args.get('exclude_categories') or '').split(',') if c.strip()]
     city = (request.args.get('city') or '').strip()
     location_type = (request.args.get('location_type') or '').strip().lower()
     q = (request.args.get('q') or '').strip()
@@ -176,12 +227,36 @@ def list_businesses(current_user):
     except (TypeError, ValueError):
         page = 1
 
+    near_lat = near_lng = None
+    if sort == 'distance':
+        try:
+            near_lat, near_lng = float(request.args.get('lat')), float(request.args.get('lng'))
+        except (TypeError, ValueError):
+            return jsonify({'message': 'sort=distance requires numeric lat and lng'}), 400
+
+    # Small chance per public listing request to fire any social post whose
+    # scheduled time has arrived -- see social.py's maybe_publish_due_posts
+    # for why this is opportunistic rather than a real cron job.
+    maybe_publish_due_posts()
+
     query = Business.query.options(*_feed_options())
 
     if category:
         if category not in BUSINESS_CATEGORIES:
             return jsonify({'message': f'category must be one of: {", ".join(BUSINESS_CATEGORIES)}'}), 400
         query = query.filter(Business.category == category)
+
+    if categories:
+        invalid = [c for c in categories if c not in BUSINESS_CATEGORIES]
+        if invalid:
+            return jsonify({'message': f'categories must be one of: {", ".join(BUSINESS_CATEGORIES)}'}), 400
+        query = query.filter(Business.category.in_(categories))
+
+    if exclude_categories:
+        invalid = [c for c in exclude_categories if c not in BUSINESS_CATEGORIES]
+        if invalid:
+            return jsonify({'message': f'exclude_categories must be one of: {", ".join(BUSINESS_CATEGORIES)}'}), 400
+        query = query.filter(Business.category.notin_(exclude_categories))
 
     if food_only:
         query = query.filter(Business.category.in_(FOOD_CATEGORIES))
@@ -213,15 +288,31 @@ def list_businesses(current_user):
             BusinessLocation.lat.between(south, north), BusinessLocation.lng.between(west, east))
         query = query.filter(Business.id.in_(loc_ids))
 
-    if sort == 'alpha':
-        query = query.order_by(Business.name.asc())
-    elif sort == 'rating':
-        query = query.order_by(Business.rating_avg.desc(), Business.rating_count.desc())
-    else:
-        query = query.order_by(func.random())
+    # Captured before order_by is applied -- an ORDER BY (especially the
+    # random-sort default) is irrelevant to a row count and only adds cost.
+    # Reflects every SQL-level filter above; the kashrut/open_now branch
+    # below overrides this with the Python-filtered count instead, since
+    # those two live in per-location JSON and aren't filtered in SQL.
+    total = query.count()
 
-    if kashrut_only or open_now:
-        # Hours/kashrut live in per-location JSON, so this is filtered in
+    # Boosted businesses (see routes/business_owner_tools.py) always sort
+    # first, regardless of the requested sort -- that's the entire point of
+    # earning one. Distance sort is applied in Python below (see the
+    # candidate-window branch) since it needs a per-location computation.
+    now = datetime.utcnow()
+    boost_first = db.case((Business.boost_until.isnot(None) & (Business.boost_until > now), 0), else_=1)
+    if sort == 'alpha':
+        query = query.order_by(boost_first, Business.name.asc())
+    elif sort == 'rating':
+        query = query.order_by(boost_first, Business.rating_avg.desc(), Business.rating_count.desc())
+    elif sort == 'distance':
+        query = query.order_by(boost_first)  # final distance ordering happens in Python below
+    else:
+        query = query.order_by(boost_first, func.random())
+
+    if kashrut_only or open_now or sort == 'distance':
+        # Hours/kashrut live in per-location JSON and distance needs a
+        # per-location computation, so all three are filtered/sorted in
         # Python against a capped candidate window rather than in SQL --
         # simple and correct at this site's current scale.
         candidates = query.limit(CANDIDATE_CAP).all()
@@ -231,9 +322,25 @@ def list_businesses(current_user):
                 return False
             if open_now and not any(_location_open_now(l) for l in b.locations):
                 return False
+            if sort == 'distance' and not any(l.lat is not None and l.lng is not None for l in b.locations):
+                return False
             return True
 
         filtered = [b for b in candidates if matches(b)]
+
+        if sort == 'distance':
+            def min_distance(b):
+                dists = [(l.lat - near_lat) ** 2 + (l.lng - near_lng) ** 2
+                         for l in b.locations if l.lat is not None and l.lng is not None]
+                return min(dists) if dists else float('inf')
+            boosted_active = {b.id for b in filtered if b.boost_until and b.boost_until > now}
+            filtered.sort(key=lambda b: (0 if b.id in boosted_active else 1, min_distance(b)))
+
+        # Same CANDIDATE_CAP caveat as the query above: if there are more
+        # than CANDIDATE_CAP SQL-level matches, this undercounts. Matches
+        # the existing "simple and correct at this site's current scale"
+        # tradeoff rather than a separate uncapped count query.
+        total = len(filtered)
         start = (page - 1) * PAGE_SIZE
         page_rows = filtered[start:start + PAGE_SIZE + 1]
         has_more = len(page_rows) > PAGE_SIZE
@@ -244,7 +351,7 @@ def list_businesses(current_user):
         businesses = rows[:PAGE_SIZE]
 
     schema = make_business_schema(current_user, many=True, card=True)
-    return jsonify({'businesses': schema.dump(businesses), 'page': page, 'has_more': has_more})
+    return jsonify({'businesses': schema.dump(businesses), 'page': page, 'has_more': has_more, 'total': total})
 
 
 @business_api.route('/businesses/<identifier>', methods=['GET'])

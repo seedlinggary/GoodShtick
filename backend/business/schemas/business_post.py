@@ -24,7 +24,11 @@ class BusinessPostSchema(Schema):
         return get_public_url(obj.image) if obj.image else None
 
     def get_is_own_post(self, obj):
-        uid = self.context.get('user_id')
+        # `context` is only set when constructed via make_business_post_schema
+        # below -- when this schema is nested inside another one (e.g.
+        # RedemptionSchema), marshmallow instantiates it directly and never
+        # sets context, so this has to tolerate it being absent.
+        uid = getattr(self, 'context', None) and self.context.get('user_id')
         return bool(uid) and obj.user_id == uid
 
 

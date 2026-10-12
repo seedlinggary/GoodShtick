@@ -1,3 +1,5 @@
+import hmac
+import os
 import jwt
 from functools import wraps
 from flask import jsonify, request
@@ -66,3 +68,19 @@ def role_required(*roles):
 
 admin_required = role_required('admin', 'super_admin')
 super_admin_required = role_required('super_admin')
+
+
+def cron_secret_required(f):
+    """For endpoints meant to be hit by a scheduler (Vercel Cron, or an
+    external one like cron-job.org) rather than a logged-in user -- compares
+    an `X-Cron-Secret` header against CRON_SECRET using a constant-time
+    comparison. If CRON_SECRET isn't set, the endpoint refuses every request
+    rather than silently accepting an unauthenticated one."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        expected = os.environ.get('CRON_SECRET')
+        provided = request.headers.get('X-Cron-Secret', '')
+        if not expected or not hmac.compare_digest(expected, provided):
+            return jsonify({'message': 'Not authorized'}), 401
+        return f(*args, **kwargs)
+    return decorated

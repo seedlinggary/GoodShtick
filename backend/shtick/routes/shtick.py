@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy import func
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
 from config import db, cache
 from security import token_required, admin_required
 from backend.shtick.modals.shtick import Shtick
@@ -25,14 +25,23 @@ from config import application
 from upload import upload_file
 
 def _feed_options():
-    """Eager-load options for the public feed. Called at request time, not import time."""
+    """Eager-load options for the public feed. Called at request time, not import time.
+
+    user/content/url/picture are all scalar (many-to-one or 1-to-1) relations,
+    so joinedload folds each into the main query as a LEFT JOIN -- one row per
+    Shtick either way, no duplication risk -- instead of its own extra round
+    trip. categories/likes are one/many-to-many and stay selectinload (a join
+    there would multiply the Shtick rows). On the Daily Board's "Shake the
+    board" (uncached by design, see /shake_board) this cuts what was 7
+    sequential round trips to the remote DB down to 3, which is most of why
+    that click used to take several seconds to visibly do anything."""
     return [
-        selectinload(Shtick.user),
+        joinedload(Shtick.user),
         selectinload(Shtick.categories),
         selectinload(Shtick.likes),
-        selectinload(Shtick.content),
-        selectinload(Shtick.url),
-        selectinload(Shtick.picture),
+        joinedload(Shtick.content),
+        joinedload(Shtick.url),
+        joinedload(Shtick.picture),
     ]
 
 shtick_api = Blueprint('shtick_api', __name__, url_prefix='/shtick')
@@ -159,13 +168,21 @@ def _board_feed_page(page, current_user=None, bucket=None):
                .limit(BOARD_SHTICK_CANDIDATES).all())
     shticks = _tiered_shuffle(shticks, 'shtick', now, bucket)
 
+    # Eager-loaded here (rather than left to lazy-load at dump time) even
+    # though only one candidate per page actually gets serialized below --
+    # a lazy access at dump time is still its own extra round trip per
+    # relation, same cost as batching it in now, but batching it in means it
+    # happens alongside the queries above instead of stacking after them.
     hock_posts = (HockPost.query
+                  .options(joinedload(HockPost.user), selectinload(HockPost.likes),
+                           selectinload(HockPost.comments))
                   .filter_by(approved_to_publish=True)
                   .order_by(HockPost.pub_date.desc())
                   .limit(BOARD_HOCK_CANDIDATES).all())
     hock_posts = _tiered_shuffle(hock_posts, 'hock', now, bucket)
 
     tachlis_posts = (TachlisPost.query
+                      .options(joinedload(TachlisPost.user))
                       .filter_by(approved_to_publish=True)
                       .order_by(TachlisPost.pub_date.desc())
                       .limit(BOARD_TACHLIS_CANDIDATES).all())

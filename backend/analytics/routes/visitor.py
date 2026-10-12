@@ -94,6 +94,7 @@ def beacon(current_user):
     """
     body = request.get_json(silent=True) or {}
     anon_id = (body.get('anon_id') or '').strip()[:64] or secrets.token_urlsafe(32)
+    site = (body.get('site') or '').strip()[:20] or None
 
     is_localhost = _looks_like_localhost()
 
@@ -107,6 +108,8 @@ def beacon(current_user):
             session_row.page_view_count = (session_row.page_view_count or 0) + 1
             if current_user and not session_row.user_id:
                 session_row.user_id = current_user.public_id
+            if site and not session_row.site:
+                session_row.site = site
         else:
             session_row = VisitorSession(
                 anonymous_id=anon_id,
@@ -116,6 +119,7 @@ def beacon(current_user):
                 last_seen=now,
                 page_view_count=1,
                 is_localhost=False,
+                site=site,
             )
             db.session.add(session_row)
 
@@ -124,6 +128,7 @@ def beacon(current_user):
             event_type='page_view',
             path=body.get('path'),
             created_at=now,
+            site=site,
         ))
         db.session.commit()
         _maybe_cleanup()
@@ -131,19 +136,32 @@ def beacon(current_user):
     return jsonify({'message': 'ok', 'anon_id': anon_id})
 
 
-def _visitor_counts(days, staff_ids):
+def _filter_site(query, model, site):
+    """Applies a `site` scope to a query, when one is given. `site=None` means
+    "every sub-site" (the existing whole-platform dashboard's behavior,
+    unchanged) -- it does NOT mean "rows with a null site," since plenty of
+    pre-this-column history and any future untracked sub-site would have
+    site=None on the row itself. Passing an explicit site string is the only
+    way to narrow to one sub-site."""
+    if site is None:
+        return query
+    return query.filter(model.site == site)
+
+
+def _visitor_counts(days, staff_ids, site=None):
     cutoff = datetime.utcnow() - timedelta(days=days)
     base = _exclude_staff(VisitorSession.query.filter(
         VisitorSession.last_seen >= cutoff,
         VisitorSession.is_localhost.is_(False),
     ), staff_ids)
+    base = _filter_site(base, VisitorSession, site)
     total = base.with_entities(func.count(func.distinct(VisitorSession.anonymous_id))).scalar() or 0
     logged_in = (base.filter(VisitorSession.user_id.isnot(None))
                  .with_entities(func.count(func.distinct(VisitorSession.anonymous_id))).scalar() or 0)
     return {'total': total, 'logged_in': logged_in, 'anonymous': total - logged_in}
 
 
-def _visitor_day_stats():
+def _visitor_day_stats(site=None):
     """anonymous_id -> (first-ever active date, count of distinct calendar
     days they've been active on), across all history -- not just the current
     window. One unified definition of "returning" is used everywhere below:
@@ -154,21 +172,28 @@ def _visitor_day_stats():
     later day" definition for anyone whose first-ever visit fell inside the
     window -- same underlying data, two different day-vs-period-relative
     definitions producing different-looking numbers side by side. This is the
-    one definition both use now.)"""
-    rows = (db.session.query(
+    one definition both use now.)
+
+    When scoped to a `site`, "first-ever active day"/"distinct days" are
+    both computed only from that site's own events -- otherwise someone who
+    has browsed the main site for months but is brand new to the Business
+    directory today would count as a "returning" business visitor, which
+    isn't a useful answer to "is Business's own audience growing."""
+    rows = db.session.query(
         VisitorEvent.anonymous_id,
         func.min(func.date(VisitorEvent.created_at)),
         func.count(func.distinct(func.date(VisitorEvent.created_at))))
-        .group_by(VisitorEvent.anonymous_id).all())
+    rows = _filter_site(rows, VisitorEvent, site)
+    rows = rows.group_by(VisitorEvent.anonymous_id).all()
     return {anon_id: (first_day, day_count) for anon_id, first_day, day_count in rows}
 
 
-def _new_vs_returning_counts(days, staff_ids, day_stats_by_id):
+def _new_vs_returning_counts(days, staff_ids, day_stats_by_id, site=None):
     cutoff = datetime.utcnow() - timedelta(days=days)
-    active_ids = (_exclude_staff(VisitorSession.query.filter(
+    active = _exclude_staff(VisitorSession.query.filter(
         VisitorSession.last_seen >= cutoff, VisitorSession.is_localhost.is_(False),
     ), staff_ids)
-        .with_entities(VisitorSession.anonymous_id).distinct().all())
+    active_ids = _filter_site(active, VisitorSession, site).with_entities(VisitorSession.anonymous_id).distinct().all()
     new_count = 0
     returning_count = 0
     for (anon_id,) in active_ids:
@@ -180,7 +205,7 @@ def _new_vs_returning_counts(days, staff_ids, day_stats_by_id):
     return {'new': new_count, 'returning': returning_count}
 
 
-def _daily_new_vs_returning(days, staff_ids, day_stats_by_id):
+def _daily_new_vs_returning(days, staff_ids, day_stats_by_id, site=None):
     """Per-day new/returning split for the trend chart -- for each calendar
     day, how many distinct visitors were active, split by whether that day
     was their first-ever active day or a later, repeat day."""
@@ -189,6 +214,7 @@ def _daily_new_vs_returning(days, staff_ids, day_stats_by_id):
     pairs = (db.session.query(VisitorEvent.anonymous_id, day_col.label('day'))
              .join(VisitorSession, VisitorSession.anonymous_id == VisitorEvent.anonymous_id)
              .filter(VisitorEvent.created_at >= cutoff, VisitorSession.is_localhost.is_(False)))
+    pairs = _filter_site(pairs, VisitorEvent, site)
     if staff_ids:
         pairs = pairs.filter(db.or_(VisitorSession.user_id.is_(None),
                                      ~VisitorSession.user_id.in_(staff_ids)))
@@ -202,55 +228,65 @@ def _daily_new_vs_returning(days, staff_ids, day_stats_by_id):
     return [{'date': d, **counts} for d, counts in sorted(daily.items())]
 
 
-@analytics_api.route('/dashboard', methods=['GET'])
-@super_admin_required
-@cache.cached(timeout=60)
-def dashboard(_current_user):
+def build_dashboard_payload(site=None):
+    """Shared by the whole-platform dashboard (site=None) and the
+    Business-only one (site='business', see business_analytics.py) -- same
+    metrics, just scoped to one sub-site's own sessions/events when a site is
+    given."""
     staff_ids = _staff_public_ids()
 
     visitors = {
-        '7d': _visitor_counts(7, staff_ids),
-        '30d': _visitor_counts(30, staff_ids),
-        '90d': _visitor_counts(90, staff_ids),
+        '7d': _visitor_counts(7, staff_ids, site),
+        '30d': _visitor_counts(30, staff_ids, site),
+        '90d': _visitor_counts(90, staff_ids, site),
     }
 
-    avg_views = (_exclude_staff(VisitorSession.query.filter(VisitorSession.is_localhost.is_(False)), staff_ids)
-                 .with_entities(func.avg(VisitorSession.page_view_count)).scalar())
+    avg_base = _exclude_staff(VisitorSession.query.filter(VisitorSession.is_localhost.is_(False)), staff_ids)
+    avg_views = _filter_site(avg_base, VisitorSession, site).with_entities(func.avg(VisitorSession.page_view_count)).scalar()
     avg_page_views = round(float(avg_views or 0), 1)
 
-    country_rows = (_exclude_staff(db.session.query(
+    country_base = _exclude_staff(db.session.query(
         func.coalesce(VisitorSession.country, 'Unknown').label('country'),
         func.count(func.distinct(VisitorSession.anonymous_id)).label('visitor_count'))
         .filter(VisitorSession.is_localhost.is_(False)), staff_ids)
+    country_rows = (_filter_site(country_base, VisitorSession, site)
         .group_by('country')
         .order_by(func.count(func.distinct(VisitorSession.anonymous_id)).desc())
         .limit(10).all())
     top_countries = [{'country': c, 'count': n} for c, n in country_rows]
 
-    day_stats_by_id = _visitor_day_stats()
+    day_stats_by_id = _visitor_day_stats(site)
     new_vs_returning = {
-        '7d': _new_vs_returning_counts(7, staff_ids, day_stats_by_id),
-        '30d': _new_vs_returning_counts(30, staff_ids, day_stats_by_id),
-        '90d': _new_vs_returning_counts(90, staff_ids, day_stats_by_id),
+        '7d': _new_vs_returning_counts(7, staff_ids, day_stats_by_id, site),
+        '30d': _new_vs_returning_counts(30, staff_ids, day_stats_by_id, site),
+        '90d': _new_vs_returning_counts(90, staff_ids, day_stats_by_id, site),
     }
-    daily_new_vs_returning = _daily_new_vs_returning(30, staff_ids, day_stats_by_id)
+    daily_new_vs_returning = _daily_new_vs_returning(30, staff_ids, day_stats_by_id, site)
 
     trend_cutoff = datetime.utcnow() - timedelta(days=30)
     day_col = func.date(VisitorSession.first_seen)
-    trend_rows = (_exclude_staff(db.session.query(
+    trend_base = _exclude_staff(db.session.query(
         day_col.label('day'),
         func.count(func.distinct(VisitorSession.anonymous_id)).label('new_visitors'))
         .filter(VisitorSession.first_seen >= trend_cutoff, VisitorSession.is_localhost.is_(False)), staff_ids)
+    trend_rows = (_filter_site(trend_base, VisitorSession, site)
         .group_by('day')
         .order_by('day')
         .all())
     daily_trend = [{'date': str(d), 'count': n} for d, n in trend_rows]
 
-    return jsonify({
+    return {
         'visitors': visitors,
         'avg_page_views': avg_page_views,
         'top_countries': top_countries,
         'daily_trend': daily_trend,
         'new_vs_returning': new_vs_returning,
         'daily_new_vs_returning': daily_new_vs_returning,
-    })
+    }
+
+
+@analytics_api.route('/dashboard', methods=['GET'])
+@super_admin_required
+@cache.cached(timeout=60)
+def dashboard(_current_user):
+    return jsonify(build_dashboard_payload(site=None))

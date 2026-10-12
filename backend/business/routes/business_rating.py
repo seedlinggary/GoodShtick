@@ -5,6 +5,7 @@ from config import db
 from security import token_required, token_optional
 from backend.business.modals.business import Business
 from backend.business.modals.business_rating import BusinessRating
+from backend.business.modals.business_redemption import BusinessRedemption
 from backend.business.schemas.business import RatingSchema
 
 business_rating_api = Blueprint('business_rating_api', __name__, url_prefix='/business')
@@ -56,13 +57,20 @@ def rate_business(current_user, business_id):
     if len(review_text) > REVIEW_MAX:
         return jsonify({'message': f'Review must be {REVIEW_MAX} characters or fewer'}), 400
 
+    # A review is "verified" when this reviewer has an actual redeemed deal
+    # at this business -- real activity, not a claim they can make
+    # themselves (see BusinessRating.verified).
+    verified = BusinessRedemption.query.filter_by(
+        business_id=business_id, user_id=current_user.public_id, status='redeemed').first() is not None
+
     rating = BusinessRating.query.filter_by(business_id=business_id, user_id=current_user.public_id).first()
     if rating:
         rating.stars = stars
         rating.review_text = review_text or None
+        rating.verified = rating.verified or verified
     else:
         rating = BusinessRating(business_id=business_id, user_id=current_user.public_id,
-                                 stars=stars, review_text=review_text or None)
+                                 stars=stars, review_text=review_text or None, verified=verified)
         db.session.add(rating)
 
     db.session.flush()
