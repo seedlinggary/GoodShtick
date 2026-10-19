@@ -139,6 +139,19 @@ def list_community_states():
     return jsonify({'states': [s for (s,) in rows]})
 
 
+@community_api.route('/communities/sitemap-data', methods=['GET'])
+def community_sitemap_data():
+    """Minimal {slug, updated} rows for every community -- see
+    business.py's sitemap_data() for why this stays a lean, joinless query."""
+    rows = db.session.query(Community.slug, Community.pub_date).all()
+    return jsonify({
+        'communities': [
+            {'slug': slug, 'updated': pub_date.isoformat() if pub_date else None}
+            for slug, pub_date in rows
+        ],
+    })
+
+
 @community_api.route('/communities/<slug>', methods=['GET'])
 @token_optional
 def get_community(current_user, slug):

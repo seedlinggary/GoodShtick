@@ -195,6 +195,23 @@ def business_stats():
     })
 
 
+@business_api.route('/sitemap-data', methods=['GET'])
+def sitemap_data():
+    """Minimal {slug, category, updated} rows for every business -- feeds the
+    frontend's dynamically-generated sitemap.xml (see good-shtick/api/sitemap.js).
+    Deliberately returns only these three columns (no joins, no locations)
+    since a full business list payload would be wasteful for a job that just
+    needs to print <url> entries; there's no separate updated_at column, so
+    pub_date is the best lastmod proxy available."""
+    rows = db.session.query(Business.slug, Business.category, Business.pub_date).all()
+    return jsonify({
+        'businesses': [
+            {'slug': slug, 'category': category, 'updated': pub_date.isoformat() if pub_date else None}
+            for slug, category, pub_date in rows
+        ],
+    })
+
+
 @business_api.route('/businesses', methods=['GET'])
 @token_optional
 def list_businesses(current_user):
