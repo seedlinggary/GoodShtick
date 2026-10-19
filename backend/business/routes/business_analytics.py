@@ -187,6 +187,127 @@ def admin_business_analytics(_current_user):
     return jsonify(payload)
 
 
+@business_analytics_api.route('/admin/recent-additions', methods=['GET'])
+@super_admin_required
+def admin_recent_additions(_current_user):
+    """Super Admin's "who's adding businesses, and from where" view --
+    distinguishes a real owner self-listing their own business (imported is
+    False, created_by is that owner) from a bulk import (imported is True,
+    source_name says which site it came from, created_by is whichever
+    account ran the import script). Filterable by who added it and by date
+    range, so an admin can tell their own additions apart from a teammate's
+    or from an unattended/random source.
+
+    `added_by` is one of: omitted/'all', a user's public_id (their own
+    self-submitted businesses only), 'imported:<source_name>' (that import
+    source's businesses, source_name exactly as stored), 'imported' (any
+    import, any source), or 'imported:__other__' (every import source NOT
+    big enough to get its own dropdown entry -- see MIN_SOURCE_COUNT below)."""
+    added_by = (request.args.get('added_by') or '').strip()
+    since = (request.args.get('since') or '').strip()
+    until = (request.args.get('until') or '').strip()
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+    per_page = 50
+
+    # One real business import (the original kashrus-list bulk import) wrote
+    # a distinct source_name per establishment-citation page rather than per
+    # batch, so the raw list of distinct source_names runs into the hundreds
+    # -- useless as a dropdown. Only sources this large get their own filter
+    # entry; everything smaller is reachable via the single '__other__' bucket.
+    MIN_SOURCE_COUNT = 30
+    big_sources = [s for (s,) in db.session.query(Business.source_name)
+                   .filter(Business.imported.is_(True), Business.source_name.isnot(None))
+                   .group_by(Business.source_name)
+                   .having(func.count(Business.id) >= MIN_SOURCE_COUNT).all()]
+
+    query = Business.query
+
+    if added_by == 'imported:__other__':
+        query = query.filter(Business.imported.is_(True), Business.source_name.notin_(big_sources))
+    elif added_by.startswith('imported:'):
+        source = added_by[len('imported:'):]
+        query = query.filter(Business.imported.is_(True), Business.source_name == source)
+    elif added_by == 'imported':
+        query = query.filter(Business.imported.is_(True))
+    elif added_by:
+        query = query.filter(Business.imported.is_(False), Business.created_by == added_by)
+
+    if since:
+        try:
+            query = query.filter(Business.pub_date >= datetime.fromisoformat(since))
+        except ValueError:
+            return jsonify({'message': 'since must be an ISO date'}), 400
+    if until:
+        try:
+            query = query.filter(Business.pub_date <= datetime.fromisoformat(until) + timedelta(days=1))
+        except ValueError:
+            return jsonify({'message': 'until must be an ISO date'}), 400
+
+    total = query.count()
+    rows = (query.options(db.selectinload(Business.locations))
+            .order_by(Business.pub_date.desc())
+            .offset((page - 1) * per_page).limit(per_page).all())
+
+    creator_ids = {b.created_by for b in rows if b.created_by}
+    creators_by_id = {}
+    if creator_ids:
+        for u in User.query.filter(User.public_id.in_(creator_ids)).all():
+            creators_by_id[u.public_id] = u
+
+    def added_by_label(b):
+        if b.imported:
+            return {'kind': 'imported', 'label': b.source_name or 'Imported', 'detail': b.source_url}
+        creator = creators_by_id.get(b.created_by)
+        if creator:
+            return {'kind': 'user', 'label': creator.profile_name, 'detail': creator.email, 'public_id': creator.public_id}
+        return {'kind': 'unknown', 'label': 'Unknown', 'detail': None}
+
+    results = []
+    for b in rows:
+        loc = next((l for l in b.locations if l.is_primary), (b.locations[0] if b.locations else None))
+        results.append({
+            'id': b.id, 'name': b.name, 'slug': b.slug, 'category': b.category,
+            'city': loc.city if loc else None, 'state': loc.state if loc else None,
+            'is_claimed': b.is_claimed,
+            'pub_date': b.pub_date.isoformat() if b.pub_date else None,
+            'added_by': added_by_label(b),
+        })
+
+    # Filter-dropdown options: every distinct real self-submitter, and every
+    # import source big enough to be worth its own entry (see big_sources
+    # above) -- built unfiltered so the dropdown doesn't shrink to just
+    # whatever the current filter already narrowed down to.
+    has_other_sources = bool(
+        db.session.query(Business.id)
+        .filter(Business.imported.is_(True), Business.source_name.isnot(None), Business.source_name.notin_(big_sources))
+        .first()
+    )
+    self_submitter_ids = [c for (c,) in db.session.query(Business.created_by)
+                           .filter(Business.imported.is_(False), Business.created_by.isnot(None))
+                           .distinct().all()]
+    self_submitters = []
+    if self_submitter_ids:
+        for u in User.query.filter(User.public_id.in_(self_submitter_ids)).all():
+            self_submitters.append({'public_id': u.public_id, 'name': u.profile_name, 'email': u.email})
+    self_submitters.sort(key=lambda u: (u['name'] or '').lower())
+
+    return jsonify({
+        'results': results,
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'has_more': page * per_page < total,
+        'filters': {
+            'import_sources': sorted(big_sources),
+            'has_other_sources': has_other_sources,
+            'self_submitters': self_submitters,
+        },
+    })
+
+
 @business_analytics_api.route('/admin/businesses/search', methods=['GET'])
 @super_admin_required
 def admin_business_search(_current_user):

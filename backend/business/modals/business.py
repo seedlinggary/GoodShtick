@@ -9,7 +9,8 @@ from datetime import datetime
 BUSINESS_CATEGORIES = (
     'restaurant', 'grocery', 'retail', 'professional_services',
     'health_beauty', 'home_services', 'education', 'entertainment',
-    'automotive', 'nonprofit', 'gemach', 'shul', 'kollel', 'other',
+    'automotive', 'nonprofit', 'gemach', 'shul', 'kollel', 'mikvah',
+    'attraction', 'other',
 )
 
 # Categories where a "kosher/kashrut" filter is relevant on the frontend.

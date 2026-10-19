@@ -35,6 +35,21 @@ application.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_pre_ping': True,
     'pool_recycle': 280,
     'pool_timeout': 10,
+    # pool_pre_ping only re-validates a connection when it's checked back
+    # OUT of the pool -- it can't catch one that goes stale mid-transaction
+    # during a single long-lived session (e.g. a bulk import script), which
+    # was observed hanging indefinitely with the connection stuck "idle in
+    # transaction" after the network silently dropped it. TCP keepalives
+    # make a dead connection detectable within ~60s instead of never, and
+    # statement_timeout kills any single query that hangs server-side so it
+    # comes back as a catchable error instead of blocking forever.
+    'connect_args': {
+        'keepalives': 1,
+        'keepalives_idle': 30,
+        'keepalives_interval': 10,
+        'keepalives_count': 3,
+        'options': '-c statement_timeout=30000',
+    },
 }
 
 # Cache: simple in-memory, no Redis required

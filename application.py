@@ -40,6 +40,8 @@ from backend.business.routes.business_feedback import feedback_api
 from backend.business.routes.loyalty_card import loyalty_api
 from backend.business.routes.business_referral_code import referral_code_api
 from backend.business.routes.business_insights import insights_api
+from backend.business.routes.community import community_api
+from backend.business.routes.minyan import minyan_api
 from backend.business.routes.admin_integrations import admin_integrations_api
 
 # Models — imported so SQLAlchemy's mapper registry can resolve string-based
@@ -117,6 +119,8 @@ application.register_blueprint(loyalty_api)
 application.register_blueprint(referral_code_api)
 application.register_blueprint(insights_api)
 application.register_blueprint(admin_integrations_api)
+application.register_blueprint(community_api)
+application.register_blueprint(minyan_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold

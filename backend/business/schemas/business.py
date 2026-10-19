@@ -47,6 +47,7 @@ class BusinessCardSchema(Schema):
     types = fields.Method('get_types')
     is_boosted = fields.Method('get_is_boosted')
     primary_location = fields.Method('get_primary_location')
+    community_info = fields.Method('get_community_info')
 
     def get_logo_url(self, obj):
         return get_public_url(obj.logo) if obj.logo else None
@@ -56,6 +57,17 @@ class BusinessCardSchema(Schema):
 
     def get_types(self, obj):
         return (obj.attributes or {}).get('types') or []
+
+    # A lean, named allowlist rather than dumping the raw attributes blob --
+    # these are specifically the extra fields the "Find a Community" feature
+    # surfaces (shul rabbi/hashkafa/size, mikvah accessibility/scheduling),
+    # sourced from the OU Communities API and mikvah.org. Anything else an
+    # owner or another import stashes in attributes stays internal.
+    def get_community_info(self, obj):
+        attrs = obj.attributes or {}
+        keys = ('rabbi_name', 'hashkafa', 'families_count', 'wheelchair_accessible', 'mikvah_schedule')
+        info = {k: attrs[k] for k in keys if attrs.get(k) not in (None, '')}
+        return info or None
 
     def get_is_boosted(self, obj):
         from datetime import datetime

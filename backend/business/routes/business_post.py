@@ -17,10 +17,14 @@ PAGE_SIZE = 20
 TITLE_MAX = 150
 BODY_MAX = 4000
 DEFAULT_EXPIRES_DAYS = 30
+CANDIDATE_CAP = 500  # see list_posts(): only used for the Python-side sort=distance pass
 
 
 def _feed_options():
-    return [selectinload(BusinessPost.user), selectinload(BusinessPost.business)]
+    return [
+        selectinload(BusinessPost.user),
+        selectinload(BusinessPost.business).selectinload(Business.locations),
+    ]
 
 
 def _owns_business(business, user):
@@ -32,8 +36,11 @@ def _owns_business(business, user):
 def list_posts(current_user):
     """Public deals feed across every business. Newest-first by default;
     ?sort=random gives the same 'shake the board' surprise-me option as the
-    directory and the rest of the site. Filters: post_type, city (via the
-    business's locations), business_id, q."""
+    directory and the rest of the site; ?sort=distance (with lat/lng) sorts
+    by proximity to the posting business's nearest location, the same
+    candidate-window approach list_businesses() uses for its own "Near me"
+    (a post has no lat/lng of its own -- it inherits its business's).
+    Filters: post_type, city (via the business's locations), business_id, q."""
     post_type = (request.args.get('type') or '').strip().lower()
     city = (request.args.get('city') or '').strip()
     business_id = request.args.get('business_id')
@@ -43,6 +50,13 @@ def list_posts(current_user):
         page = max(1, int(request.args.get('page', 1)))
     except (TypeError, ValueError):
         page = 1
+
+    near_lat = near_lng = None
+    if sort == 'distance':
+        try:
+            near_lat, near_lng = float(request.args.get('lat')), float(request.args.get('lng'))
+        except (TypeError, ValueError):
+            return jsonify({'message': 'sort=distance requires numeric lat and lng'}), 400
 
     now = datetime.utcnow()
     query = (BusinessPost.query
@@ -70,14 +84,29 @@ def list_posts(current_user):
         query = query.join(BusinessPost.business).filter(
             db.or_(BusinessPost.title.ilike(like), BusinessPost.body.ilike(like), Business.name.ilike(like)))
 
-    if sort == 'random':
-        query = query.order_by(func.random())
-    else:
-        query = query.order_by(BusinessPost.pub_date.desc())
+    if sort == 'distance':
+        candidates = query.limit(CANDIDATE_CAP).all()
 
-    rows = query.limit(PAGE_SIZE + 1).offset((page - 1) * PAGE_SIZE).all()
-    has_more = len(rows) > PAGE_SIZE
-    posts = rows[:PAGE_SIZE]
+        def min_distance(post):
+            locs = post.business.locations if post.business else []
+            dists = [(l.lat - near_lat) ** 2 + (l.lng - near_lng) ** 2 for l in locs if l.lat is not None and l.lng is not None]
+            return min(dists) if dists else float('inf')
+
+        filtered = [p for p in candidates if min_distance(p) != float('inf')]
+        filtered.sort(key=min_distance)
+        total = len(filtered)
+        start = (page - 1) * PAGE_SIZE
+        page_rows = filtered[start:start + PAGE_SIZE + 1]
+        has_more = len(page_rows) > PAGE_SIZE
+        posts = page_rows[:PAGE_SIZE]
+    else:
+        if sort == 'random':
+            query = query.order_by(func.random())
+        else:
+            query = query.order_by(BusinessPost.pub_date.desc())
+        rows = query.limit(PAGE_SIZE + 1).offset((page - 1) * PAGE_SIZE).all()
+        has_more = len(rows) > PAGE_SIZE
+        posts = rows[:PAGE_SIZE]
 
     schema = make_business_post_schema(current_user, many=True)
     return jsonify({'posts': schema.dump(posts), 'page': page, 'has_more': has_more})
