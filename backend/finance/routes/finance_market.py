@@ -30,9 +30,19 @@ ALPHA_VANTAGE_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'demo')
 CACHE_TTL = {
     'quote': timedelta(minutes=20),
     'chart': timedelta(hours=12),
+    'chart_weekly': timedelta(hours=24),
     'search': timedelta(days=7),
     'indicator': timedelta(hours=24),
 }
+
+# TIME_SERIES_DAILY's free-tier "compact" size (the only size the free key
+# can request -- outputsize=full is a premium-only feature, confirmed live)
+# is capped at the latest ~100 trading days, so it only covers roughly the
+# last 4-5 months. TIME_SERIES_WEEKLY has no such cap on the free tier and
+# always returns its FULL history (confirmed live -- 1,400+ weekly points
+# back to 1999 for an established ticker), so it's used for every range a
+# user picks longer than that, and for every "look back a year/look at the
+# 52-week range" insight below, which daily data alone can't reliably cover.
 
 INDICATOR_FUNCTIONS = {
     'cpi': 'CPI',
@@ -117,15 +127,22 @@ def get_chart():
     symbol = (request.args.get('symbol') or '').strip().upper()
     if not symbol:
         return jsonify({'message': 'symbol is required'}), 400
+    weekly = (request.args.get('series') or '').strip().lower() == 'weekly'
 
     def fetch():
-        # outputsize is left unset deliberately -- Alpha Vantage already
-        # defaults TIME_SERIES_DAILY to "compact" (latest ~100 points) with
-        # no param at all, and passing outputsize=compact explicitly is
-        # rejected by the free "demo" key specifically (confirmed live),
-        # even though a real registered key accepts it fine.
-        data = _av_get({'function': 'TIME_SERIES_DAILY', 'symbol': symbol})
-        series = data.get('Time Series (Daily)')
+        if weekly:
+            # No outputsize param here -- TIME_SERIES_WEEKLY has nothing to
+            # restrict, it always returns full history.
+            data = _av_get({'function': 'TIME_SERIES_WEEKLY', 'symbol': symbol})
+            series = data.get('Weekly Time Series')
+        else:
+            # outputsize is left unset deliberately -- Alpha Vantage already
+            # defaults TIME_SERIES_DAILY to "compact" (latest ~100 points)
+            # with no param at all, and outputsize=full/compact are both
+            # premium-only for this endpoint on the free tier (confirmed
+            # live), so there's no way to request more than compact anyway.
+            data = _av_get({'function': 'TIME_SERIES_DAILY', 'symbol': symbol})
+            series = data.get('Time Series (Daily)')
         if not series:
             raise RuntimeError('No data returned for this symbol')
         points = [
@@ -135,7 +152,9 @@ def get_chart():
         points.sort(key=lambda p: p['date'])
         return points
 
-    payload, cached, error = _cached(f'chart:{symbol}', CACHE_TTL['chart'], fetch)
+    cache_key = f'chart_weekly:{symbol}' if weekly else f'chart:{symbol}'
+    ttl = CACHE_TTL['chart_weekly'] if weekly else CACHE_TTL['chart']
+    payload, cached, error = _cached(cache_key, ttl, fetch)
     if error:
         return jsonify({'message': error}), 502
     return jsonify({'points': payload, 'cached': cached})

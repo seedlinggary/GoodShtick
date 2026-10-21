@@ -3,11 +3,16 @@ from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 
 from config import db
-from security import token_required, token_optional, super_admin_required
+from security import super_admin_required
 from upload import upload_file
 from backend.news.modals.news import NewsArticle, NewsArticleLike, CATEGORIES, slugify
 from backend.news.schemas.news import NewsArticleCardSchema, make_article_schema
 
+# Gut News is soft-locked to super_admin only for now (every route below
+# requires it, including plain reads) -- not a permanent design, just the
+# pre-launch gate until the site is ready to open to the public. Reverting
+# means swapping @super_admin_required back to @token_optional (reads) /
+# @token_required (writes), same as the other sites.
 news_article_api = Blueprint('news_article_api', __name__, url_prefix='/news')
 
 PAGE_SIZE = 24
@@ -46,12 +51,14 @@ def _public_filter(query):
 
 
 @news_article_api.route('/categories', methods=['GET'])
-def list_categories():
+@super_admin_required
+def list_categories(current_user):
     return jsonify({'categories': list(CATEGORIES)})
 
 
 @news_article_api.route('/stats', methods=['GET'])
-def news_stats():
+@super_admin_required
+def news_stats(current_user):
     base = _public_filter(NewsArticle.query)
     total = base.count()
     by_category = dict(
@@ -65,7 +72,7 @@ def news_stats():
 
 
 @news_article_api.route('/articles', methods=['GET'])
-@token_optional
+@super_admin_required
 def list_articles(current_user):
     category = (request.args.get('category') or '').strip().lower()
     q = (request.args.get('q') or '').strip()
@@ -105,7 +112,7 @@ def list_articles(current_user):
 
 
 @news_article_api.route('/articles/<identifier>', methods=['GET'])
-@token_optional
+@super_admin_required
 def get_article(current_user, identifier):
     query = NewsArticle.query.options(*_feed_options())
     article = query.filter_by(id=int(identifier)).first() if identifier.isdigit() else query.filter_by(slug=identifier).first()
@@ -121,7 +128,7 @@ def get_article(current_user, identifier):
 
 
 @news_article_api.route('/articles', methods=['POST'])
-@token_required
+@super_admin_required
 def create_article(current_user):
     """User-submitted original post -- always imported=False, published
     immediately (see NewsArticle's docstring). Scraped articles are created
@@ -156,7 +163,7 @@ def create_article(current_user):
 
 
 @news_article_api.route('/articles/<int:article_id>', methods=['PATCH'])
-@token_required
+@super_admin_required
 def edit_article(current_user, article_id):
     article = db.session.get(NewsArticle, article_id)
     if not article:
@@ -195,7 +202,7 @@ def edit_article(current_user, article_id):
 
 
 @news_article_api.route('/articles/<int:article_id>', methods=['DELETE'])
-@token_required
+@super_admin_required
 def delete_article(current_user, article_id):
     article = db.session.get(NewsArticle, article_id)
     if not article:
@@ -208,7 +215,7 @@ def delete_article(current_user, article_id):
 
 
 @news_article_api.route('/articles/<int:article_id>/like', methods=['POST'])
-@token_required
+@super_admin_required
 def like_article(current_user, article_id):
     article = db.session.get(NewsArticle, article_id)
     if not article:
@@ -221,7 +228,7 @@ def like_article(current_user, article_id):
 
 
 @news_article_api.route('/articles/<int:article_id>/like', methods=['DELETE'])
-@token_required
+@super_admin_required
 def unlike_article(current_user, article_id):
     like = NewsArticleLike.query.filter_by(article_id=article_id, user_id=current_user.public_id).first()
     if like:
@@ -231,7 +238,7 @@ def unlike_article(current_user, article_id):
 
 
 @news_article_api.route('/my/articles', methods=['GET'])
-@token_required
+@super_admin_required
 def my_articles(current_user):
     rows = (NewsArticle.query.options(*_feed_options())
             .filter_by(created_by=current_user.public_id, imported=False)
@@ -240,7 +247,7 @@ def my_articles(current_user):
 
 
 @news_article_api.route('/upload', methods=['POST'])
-@token_required
+@super_admin_required
 def news_upload(_current_user):
     filename = upload_file(request)
     if not filename:
