@@ -28,6 +28,7 @@ psycopg2-binary==2.9.12
 pydantic==2.13.4
 PyJWT==2.13.0
 python-dotenv==1.2.2
+requests==2.31.0
 resend==2.32.2
 SQLAlchemy==2.0.51
 supabase==2.31.0

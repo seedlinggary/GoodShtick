@@ -43,6 +43,15 @@ from backend.business.routes.business_insights import insights_api
 from backend.business.routes.community import community_api
 from backend.business.routes.minyan import minyan_api
 from backend.business.routes.admin_integrations import admin_integrations_api
+from backend.estates.routes.estates import estates_api
+from backend.estates.routes.estates_group_buy import group_buy_api
+from backend.finance.routes.finance_market import finance_market_api
+from backend.finance.routes.finance_budget import finance_budget_api
+from backend.torah.routes.torah_post import torah_post_api
+from backend.torah.routes.torah_sefaria import torah_sefaria_api
+from backend.torah.routes.torah_zmanim import torah_zmanim_api
+from backend.news.routes.news_article import news_article_api
+from backend.news.routes.news_scraper import news_scraper_api
 
 # Models — imported so SQLAlchemy's mapper registry can resolve string-based
 # relationship() references, and so Flask-Migrate autogenerate sees them.
@@ -82,6 +91,17 @@ from backend.business.modals.business_feedback import BusinessFeedback
 from backend.business.modals.loyalty_card import LoyaltyCard
 from backend.business.modals.business_referral_code import BusinessReferral, BusinessReferralUse
 from backend.business.modals.platform_credential import PlatformCredential
+from backend.estates.modals.estates import (
+    EstatesListing, EstatesListingPhoto, EstatesListingLike,
+    EstatesGroupBuy, EstatesGroupBuyPhoto, EstatesGroupBuyMember,
+)
+from backend.finance.modals.finance import (
+    FinanceDataCache, FinanceWatchlistItem, FinanceBudget, FinanceBudgetCategory,
+)
+from backend.torah.modals.torah import (
+    TorahPost, TorahPostPhoto, TorahPostLike, SefariaCache,
+)
+from backend.news.modals.news import NewsArticle, NewsArticleLike
 
 application.register_blueprint(user_api)
 application.register_blueprint(admin_api)
@@ -121,6 +141,15 @@ application.register_blueprint(insights_api)
 application.register_blueprint(admin_integrations_api)
 application.register_blueprint(community_api)
 application.register_blueprint(minyan_api)
+application.register_blueprint(estates_api)
+application.register_blueprint(group_buy_api)
+application.register_blueprint(finance_market_api)
+application.register_blueprint(finance_budget_api)
+application.register_blueprint(torah_post_api)
+application.register_blueprint(torah_sefaria_api)
+application.register_blueprint(torah_zmanim_api)
+application.register_blueprint(news_article_api)
+application.register_blueprint(news_scraper_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold
