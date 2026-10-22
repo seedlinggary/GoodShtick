@@ -167,6 +167,9 @@ def add_item(current_user, sheet_id):
         ref = (body.get('ref') or '').strip()
         if not ref:
             return jsonify({'message': 'ref is required for a source item'}), 400
+        # Defaults True so existing callers that never send this (older
+        # frontend builds, direct API use) keep today's behavior exactly.
+        include_translation = body.get('include_translation', True)
         try:
             text_data = fetch_sefaria_text(ref)
         except RuntimeError as e:
@@ -174,7 +177,8 @@ def add_item(current_user, sheet_id):
         item = TorahSourceSheetItem(
             sheet_id=sheet.id, position=position, item_type='source',
             custom_title=custom_title, ref=text_data.get('ref', ref),
-            he_text=text_data.get('he') or [], en_text=text_data.get('text') or [],
+            he_text=text_data.get('he') or [],
+            en_text=(text_data.get('text') or []) if include_translation else [],
             note_text=note_text,
         )
     db.session.add(item)

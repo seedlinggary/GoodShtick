@@ -80,10 +80,18 @@ def build_pdf(sheet):
         topMargin=0.75 * inch, bottomMargin=0.75 * inch, leftMargin=0.75 * inch, rightMargin=0.75 * inch,
     )
 
-    title_style = ParagraphStyle('Title', fontName='NotoLatin-Bold', fontSize=20, alignment=TA_CENTER, spaceAfter=4)
-    meta_style = ParagraphStyle('Meta', fontName='NotoLatin', fontSize=9, textColor='#666666', alignment=TA_CENTER, spaceAfter=18)
-    note_style = ParagraphStyle('Note', fontName='NotoLatin-Bold', fontSize=13, spaceBefore=14, spaceAfter=6, textColor='#1a1a1a')
-    source_title_style = ParagraphStyle('SourceTitle', fontName='NotoLatin-Bold', fontSize=12, spaceBefore=16, spaceAfter=4, textColor='#333333')
+    # Every style below sets `leading` (line height) explicitly to roughly
+    # 1.2-1.3x its fontSize -- reportlab's ParagraphStyle does NOT derive a
+    # default leading from fontSize, it's a flat 12pt default regardless of
+    # font size. Left unset, a style with fontSize noticeably above 12 (the
+    # title at 20pt was the worst case, confirmed live) wraps onto a second
+    # line that's spaced for a 12pt font, so the lines visually overlap --
+    # harmless for text that happens to fit on one line, broken the moment
+    # it doesn't (a long sheet title being the most common way to hit it).
+    title_style = ParagraphStyle('Title', fontName='NotoLatin-Bold', fontSize=20, leading=24, alignment=TA_CENTER, spaceAfter=4)
+    meta_style = ParagraphStyle('Meta', fontName='NotoLatin', fontSize=9, leading=12, textColor='#666666', alignment=TA_CENTER, spaceAfter=18)
+    note_style = ParagraphStyle('Note', fontName='NotoLatin-Bold', fontSize=13, leading=16, spaceBefore=14, spaceAfter=6, textColor='#1a1a1a')
+    source_title_style = ParagraphStyle('SourceTitle', fontName='NotoLatin-Bold', fontSize=12, leading=15, spaceBefore=16, spaceAfter=4, textColor='#333333')
     he_style = ParagraphStyle('Hebrew', fontName='NotoHebrew', fontSize=13, alignment=TA_RIGHT, leading=20, spaceAfter=6)
     en_style = ParagraphStyle('English', fontName='NotoLatin', fontSize=10.5, alignment=TA_LEFT, leading=15, spaceAfter=10, textColor='#333333')
     comment_style = ParagraphStyle('Comment', fontName='NotoLatin', fontSize=9.5, alignment=TA_LEFT, leading=13, textColor='#555555', leftIndent=10, spaceAfter=10)
