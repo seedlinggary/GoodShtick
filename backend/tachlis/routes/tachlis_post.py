@@ -146,6 +146,21 @@ def get_post(current_user, post_id):
     return jsonify(schema.dump(post))
 
 
+@tachlis_api.route('/posts/sitemap-data', methods=['GET'])
+def sitemap_data():
+    """Minimal {id, updated} rows for every approved, non-expired post --
+    same lean-query pattern as business.py's own sitemap_data(), feeds
+    good-shtick/api/sitemap.js. Expired listings are excluded the same way
+    the live listing feed excludes them (see list_posts above)."""
+    now = datetime.utcnow()
+    rows = (db.session.query(TachlisPost.id, TachlisPost.pub_date)
+            .filter(TachlisPost.approved_to_publish.is_(True))
+            .filter(db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now)).all())
+    return jsonify({
+        'posts': [{'id': pid, 'updated': pub_date.isoformat() if pub_date else None} for pid, pub_date in rows],
+    })
+
+
 @tachlis_api.route('/posts', methods=['POST'])
 @token_required
 def create_post(current_user):

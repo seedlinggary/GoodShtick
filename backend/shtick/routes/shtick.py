@@ -98,6 +98,17 @@ def get_single_post(shtick_id):
     return response
 
 
+@shtick_api.route('/sitemap-data', methods=['GET'])
+def sitemap_data():
+    """Minimal {id, updated} rows for every approved post -- same lean-query
+    pattern as business.py's own sitemap_data(), feeds good-shtick/api/sitemap.js."""
+    rows = (db.session.query(Shtick.id, Shtick.pub_date)
+            .filter(Shtick.approved_to_publish.is_(True)).all())
+    return jsonify({
+        'posts': [{'id': sid, 'updated': pub_date.isoformat() if pub_date else None} for sid, pub_date in rows],
+    })
+
+
 PAGE_SIZE = 10
 
 # ── Daily Board feed algorithm ──────────────────────────────────────────────

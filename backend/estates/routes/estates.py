@@ -50,7 +50,7 @@ def _unique_slug(title):
     return f'{base}-{n}'
 
 
-def _validate_listing_body(body, partial=False):
+def _validate_listing_body(body, partial=False, existing=None):
     """Returns (error_response_or_None, cleaned_fields_dict). `partial` skips
     required-field checks for PATCH, where an omitted key just means "leave
     as-is" (checked by the caller via `'key' in body`)."""
@@ -137,10 +137,14 @@ def _validate_listing_body(body, partial=False):
             fields[key] = val or None
 
     # At least one direct way to reach the poster -- the one hard
-    # requirement the user called out explicitly.
-    email = fields.get('contact_email', body.get('contact_email'))
-    phone = fields.get('contact_phone', body.get('contact_phone'))
-    if not partial and not (email or phone):
+    # requirement the user called out explicitly. For a PATCH, a key left
+    # out of the body means "unchanged", so fall back to the existing
+    # listing's current value rather than treating it as cleared --
+    # otherwise a PATCH clearing the one contact method a listing has would
+    # silently leave it with none.
+    email = fields['contact_email'] if 'contact_email' in fields else (existing.contact_email if existing else None)
+    phone = fields['contact_phone'] if 'contact_phone' in fields else (existing.contact_phone if existing else None)
+    if not (email or phone):
         return jsonify({'message': 'At least one of contact_email or contact_phone is required'}), None
 
     if 'attributes' in body:
@@ -315,6 +319,19 @@ def get_listing(current_user, identifier):
     return jsonify(make_listing_schema(current_user).dump(listing))
 
 
+@estates_api.route('/listings/<identifier>/seo', methods=['GET'])
+def get_listing_seo(identifier):
+    """Same lookup as get_listing, for the SEO meta-injection proxy (see
+    good-shtick/api/render.js) -- split out so a search crawler or link
+    unfurl hitting every listing page doesn't inflate views_count alongside
+    genuine visits."""
+    query = EstatesListing.query.options(*_feed_options())
+    listing = query.filter_by(id=int(identifier)).first() if identifier.isdigit() else query.filter_by(slug=identifier).first()
+    if not listing:
+        return jsonify({'message': 'Listing not found'}), 404
+    return jsonify(EstatesListingCardSchema().dump(listing))
+
+
 @estates_api.route('/listings', methods=['POST'])
 @token_required
 def create_listing(current_user):
@@ -353,7 +370,7 @@ def edit_listing(current_user, listing_id):
         return jsonify({'message': 'Not authorized'}), 403
 
     body = request.get_json() or {}
-    error, fields = _validate_listing_body(body, partial=True)
+    error, fields = _validate_listing_body(body, partial=True, existing=listing)
     if error:
         return error, 400
 
@@ -417,6 +434,8 @@ def like_listing(current_user, listing_id):
     listing = db.session.get(EstatesListing, listing_id)
     if not listing:
         return jsonify({'message': 'Listing not found'}), 404
+    if listing.created_by == current_user.public_id:
+        return jsonify({'message': 'You cannot save your own listing'}), 403
     existing = EstatesListingLike.query.filter_by(listing_id=listing_id, user_id=current_user.public_id).first()
     if not existing:
         db.session.add(EstatesListingLike(listing_id=listing_id, user_id=current_user.public_id))

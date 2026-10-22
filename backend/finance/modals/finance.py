@@ -47,23 +47,68 @@ class FinanceWatchlistItem(db.Model):
 
 
 class FinanceBudget(db.Model):
-    """One budget per user -- simplest useful version of the Budgeting page.
-    Categories (income/expense lines) live in FinanceBudgetCategory;
-    PUT /finance/budget replaces the whole category list wholesale rather
-    than patching individual rows, since the form always submits the full
-    current list anyway (see routes/finance_budget.py)."""
+    """A named budget -- a user can keep several (e.g. "Household", "Side
+    business", "If we move to Lakewood") rather than just one, since real
+    budgeting usually means comparing a few different pictures side by
+    side, not committing to a single live one. Categories (income/expense
+    lines) live in FinanceBudgetCategory; PUT /finance/budgets/<id>
+    replaces a budget's whole category list wholesale rather than patching
+    individual rows, since the form always submits the full current list
+    anyway (see routes/finance_budget.py)."""
     __tablename__ = 'finance_budget'
 
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), unique=True, nullable=False, index=True)
+    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False, index=True)
+    title = db.Column(db.String(100), nullable=False, default='My Budget', server_default='My Budget')
+    # A standalone target, separate from the income/expense categories --
+    # "how much do you PLAN to save" is a single goal to measure actual
+    # leftover (income - expenses) against, not another transaction line
+    # to add up. Null until the user sets one (no goal to compare against
+    # yet, distinct from a goal of literally $0).
+    savings_goal = db.Column(db.Float, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     categories = db.relationship('FinanceBudgetCategory', backref='budget', lazy=True,
                                   cascade='all, delete-orphan', order_by='FinanceBudgetCategory.id')
-    user = db.relationship('User', backref=db.backref('finance_budget', uselist=False, lazy=True))
+    user = db.relationship('User', backref=db.backref('finance_budgets', lazy=True))
 
-    def __init__(self, user_id):
+    def __init__(self, user_id, title='My Budget'):
         self.user_id = user_id
+        self.title = title
+
+
+CALCULATOR_KEYS = ('compound', 'retirement', 'debt', 'emergency', 'goal', 'coast_fire', 'fire_number')
+
+
+class FinanceSavedScenario(db.Model):
+    """A named, saved set of inputs for one of the Calculators-page tools --
+    "save for many different items for many different lengths" means one
+    person wants several saved runs of the SAME calculator (e.g. three
+    separate Compound Interest scenarios: a house downpayment, a car, a
+    kid's bar mitzvah), not just one live set of numbers. `inputs` is a
+    free-form JSON blob matching whatever fields that specific calculator's
+    own React state shape uses -- deliberately generic (one table for every
+    calculator) rather than a bespoke table per calculator, since a saved
+    scenario here is just "remember these numbers under this name," with no
+    server-side computation or validation of what's inside beyond that."""
+    __tablename__ = 'finance_saved_scenario'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False, index=True)
+    calculator_key = db.Column(db.String(30), nullable=False, index=True)  # CALCULATOR_KEYS
+    title = db.Column(db.String(100), nullable=False)
+    inputs = db.Column(db.JSON, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('finance_saved_scenarios', lazy=True))
+
+    def __init__(self, user_id, calculator_key, title, inputs):
+        self.user_id = user_id
+        self.calculator_key = calculator_key
+        self.title = title
+        self.inputs = inputs
 
 
 class FinanceBudgetCategory(db.Model):

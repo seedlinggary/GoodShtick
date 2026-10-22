@@ -50,6 +50,7 @@ from backend.finance.routes.finance_budget import finance_budget_api
 from backend.torah.routes.torah_post import torah_post_api
 from backend.torah.routes.torah_sefaria import torah_sefaria_api
 from backend.torah.routes.torah_zmanim import torah_zmanim_api
+from backend.torah.routes.torah_sheets import torah_sheets_api
 from backend.news.routes.news_article import news_article_api
 from backend.news.routes.news_scraper import news_scraper_api
 
@@ -96,10 +97,11 @@ from backend.estates.modals.estates import (
     EstatesGroupBuy, EstatesGroupBuyPhoto, EstatesGroupBuyMember,
 )
 from backend.finance.modals.finance import (
-    FinanceDataCache, FinanceWatchlistItem, FinanceBudget, FinanceBudgetCategory,
+    FinanceDataCache, FinanceWatchlistItem, FinanceBudget, FinanceBudgetCategory, FinanceSavedScenario,
 )
 from backend.torah.modals.torah import (
     TorahPost, TorahPostPhoto, TorahPostLike, SefariaCache,
+    TorahSourceSheet, TorahSourceSheetItem,
 )
 from backend.news.modals.news import NewsArticle, NewsArticleLike
 
@@ -148,6 +150,7 @@ application.register_blueprint(finance_budget_api)
 application.register_blueprint(torah_post_api)
 application.register_blueprint(torah_sefaria_api)
 application.register_blueprint(torah_zmanim_api)
+application.register_blueprint(torah_sheets_api)
 application.register_blueprint(news_article_api)
 application.register_blueprint(news_scraper_api)
 
@@ -317,4 +320,9 @@ def _seed_shticks(user):
 app = application
 
 if __name__ == '__main__':
-    application.run(debug=True)
+    # threaded=True matters in practice: a few routes make slow outbound
+    # calls (e.g. torah_sefaria.py's /toc, which can take minutes on a cold
+    # cache -- see its own comment), and Flask's dev server is single-
+    # threaded by default -- without this, ONE such request blocks every
+    # other request on the whole site, local to that one request's duration.
+    application.run(debug=True, threaded=True)

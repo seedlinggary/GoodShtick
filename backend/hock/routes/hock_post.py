@@ -125,6 +125,17 @@ def get_post(current_user, post_id):
     return jsonify(schema.dump(post))
 
 
+@hock_post_api.route('/posts/sitemap-data', methods=['GET'])
+def sitemap_data():
+    """Minimal {id, updated} rows for every approved post -- same lean-query
+    pattern as business.py's own sitemap_data(), feeds good-shtick/api/sitemap.js."""
+    rows = (db.session.query(HockPost.id, HockPost.pub_date)
+            .filter(HockPost.approved_to_publish.is_(True)).all())
+    return jsonify({
+        'posts': [{'id': pid, 'updated': pub_date.isoformat() if pub_date else None} for pid, pub_date in rows],
+    })
+
+
 @hock_post_api.route('/posts', methods=['POST'])
 @token_required
 def create_post(current_user):

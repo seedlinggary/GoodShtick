@@ -48,7 +48,7 @@ def _unique_slug(title):
     return f'{base}-{n}'
 
 
-def _validate_body(body, partial=False):
+def _validate_body(body, partial=False, existing=None):
     fields = {}
 
     if not partial or 'title' in body:
@@ -116,9 +116,13 @@ def _validate_body(body, partial=False):
         if key in body:
             fields[key] = (body.get(key) or '').strip()[:150] or None
 
-    email = fields.get('contact_email', body.get('contact_email'))
-    phone = fields.get('contact_phone', body.get('contact_phone'))
-    if not partial and not (email or phone):
+    # For a PATCH, a key left out of the body means "unchanged", so fall
+    # back to the existing group buy's current value rather than treating
+    # it as cleared -- otherwise a PATCH clearing the one contact method it
+    # has would silently leave it with none.
+    email = fields['contact_email'] if 'contact_email' in fields else (existing.contact_email if existing else None)
+    phone = fields['contact_phone'] if 'contact_phone' in fields else (existing.contact_phone if existing else None)
+    if not (email or phone):
         return jsonify({'message': 'At least one of contact_email or contact_phone is required'}), None
 
     return None, fields
@@ -154,6 +158,14 @@ def list_group_buys(current_user):
         query = query.filter(db.or_(
             EstatesGroupBuy.title.ilike(like), EstatesGroupBuy.description.ilike(like),
             EstatesGroupBuy.city.ilike(like), EstatesGroupBuy.neighborhood.ilike(like)))
+
+    bbox_keys = ('north', 'south', 'east', 'west')
+    if all(request.args.get(k) not in (None, '') for k in bbox_keys):
+        try:
+            north, south, east, west = (float(request.args.get(k)) for k in bbox_keys)
+        except ValueError:
+            return jsonify({'message': 'north/south/east/west must be numbers'}), 400
+        query = query.filter(EstatesGroupBuy.lat.between(south, north), EstatesGroupBuy.lng.between(west, east))
 
     total = query.count()
     query = query.order_by(EstatesGroupBuy.pub_date.desc())
@@ -209,7 +221,7 @@ def edit_group_buy(current_user, group_buy_id):
         return jsonify({'message': 'Not authorized'}), 403
 
     body = request.get_json() or {}
-    error, fields = _validate_body(body, partial=True)
+    error, fields = _validate_body(body, partial=True, existing=gb)
     if error:
         return error, 400
     for key, value in fields.items():
@@ -243,6 +255,17 @@ def delete_group_buy(current_user, group_buy_id):
     db.session.delete(gb)
     db.session.commit()
     return jsonify({'message': 'Deleted'})
+
+
+@group_buy_api.route('/group-buys/sitemap-data', methods=['GET'])
+def group_buy_sitemap_data():
+    """Minimal {slug, updated} rows for every open group buy -- same lean-
+    query pattern as estates.py's own sitemap_data()."""
+    rows = (db.session.query(EstatesGroupBuy.slug, EstatesGroupBuy.pub_date)
+            .filter(EstatesGroupBuy.is_closed.is_(False)).all())
+    return jsonify({
+        'group_buys': [{'slug': slug, 'updated': pub_date.isoformat() if pub_date else None} for slug, pub_date in rows],
+    })
 
 
 @group_buy_api.route('/group-buys/<int:group_buy_id>/join', methods=['POST'])

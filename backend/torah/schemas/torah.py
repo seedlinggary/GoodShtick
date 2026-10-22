@@ -79,3 +79,62 @@ class TorahPostSchema(Schema):
 
 def make_post_schema(current_user, many=False):
     return TorahPostSchema(current_user=current_user, many=many)
+
+
+class SourceSheetItemSchema(Schema):
+    id = fields.Int()
+    position = fields.Int()
+    item_type = fields.Str()
+    custom_title = fields.Str(allow_none=True)
+    ref = fields.Str(allow_none=True)
+    he_text = fields.Raw(allow_none=True)
+    en_text = fields.Raw(allow_none=True)
+    note_text = fields.Str(allow_none=True)
+
+
+class SourceSheetCardSchema(Schema):
+    """Lean row for sheet listings (my sheets / browse public)."""
+    id = fields.Int()
+    title = fields.Str()
+    is_public = fields.Bool()
+    created_at = fields.DateTime()
+    updated_at = fields.DateTime()
+    item_count = fields.Method('get_item_count')
+    author_name = fields.Method('get_author_name')
+    forked_from_id = fields.Int(allow_none=True)
+
+    def get_item_count(self, obj):
+        return len(obj.items)
+
+    def get_author_name(self, obj):
+        return obj.creator.profile_name if obj.creator else None
+
+
+class SourceSheetSchema(Schema):
+    id = fields.Int()
+    title = fields.Str()
+    is_public = fields.Bool()
+    created_by = fields.Str()
+    created_at = fields.DateTime()
+    updated_at = fields.DateTime()
+    forked_from_id = fields.Int(allow_none=True)
+    items = fields.Method('get_items')
+    is_own_sheet = fields.Method('get_is_own_sheet')
+    author_name = fields.Method('get_author_name')
+
+    def __init__(self, current_user=None, **kwargs):
+        super().__init__(**kwargs)
+        self.current_user = current_user
+
+    def get_items(self, obj):
+        return SourceSheetItemSchema(many=True).dump(obj.items)
+
+    def get_is_own_sheet(self, obj):
+        return bool(self.current_user and obj.created_by == self.current_user.public_id)
+
+    def get_author_name(self, obj):
+        return obj.creator.profile_name if obj.creator else None
+
+
+def make_sheet_schema(current_user, many=False):
+    return SourceSheetSchema(current_user=current_user, many=many)

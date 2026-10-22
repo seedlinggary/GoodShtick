@@ -287,6 +287,86 @@ def build_dashboard_payload(site=None):
 
 @analytics_api.route('/dashboard', methods=['GET'])
 @super_admin_required
-@cache.cached(timeout=60)
+@cache.cached(timeout=60, query_string=True)
 def dashboard(_current_user):
-    return jsonify(build_dashboard_payload(site=None))
+    site = (request.args.get('site') or '').strip() or None
+    return jsonify(build_dashboard_payload(site=site))
+
+
+SITE_LABELS = {
+    'main': 'Gut Shtick', 'business': 'Gut Community', 'estates': 'Gut Estates',
+    'money': 'Gut Money', 'torah': 'Gut Torah', 'news': 'Gut News',
+}
+PAGE_SIZE = 50
+
+
+@analytics_api.route('/sessions', methods=['GET'])
+@super_admin_required
+def list_sessions(_current_user):
+    """Who's actually showing up -- a filterable, named list behind the
+    aggregate counts on /dashboard, since "47 returning visitors" doesn't
+    tell you WHO. Each row names the logged-in visitor when there is one
+    (profile name), and flags whether they're a repeat visitor using the
+    exact same "2+ distinct calendar days active" definition the dashboard
+    trend chart uses, so the two views of "returning" never disagree."""
+    site = (request.args.get('site') or '').strip() or None
+    try:
+        days = max(1, min(365, int(request.args.get('days', 30))))
+    except (TypeError, ValueError):
+        days = 30
+    repeat_only = request.args.get('repeat_only') in ('1', 'true', 'True')
+    logged_in_filter = (request.args.get('logged_in') or '').strip().lower()
+    country = (request.args.get('country') or '').strip() or None
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+
+    staff_ids = _staff_public_ids()
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    query = _exclude_staff(VisitorSession.query.filter(
+        VisitorSession.last_seen >= cutoff, VisitorSession.is_localhost.is_(False),
+    ), staff_ids)
+    query = _filter_site(query, VisitorSession, site)
+    if logged_in_filter == 'true':
+        query = query.filter(VisitorSession.user_id.isnot(None))
+    elif logged_in_filter == 'false':
+        query = query.filter(VisitorSession.user_id.is_(None))
+    if country:
+        query = query.filter(VisitorSession.country == country)
+
+    day_stats = _visitor_day_stats(site)
+    sessions = query.order_by(VisitorSession.last_seen.desc()).all()
+
+    if repeat_only:
+        sessions = [s for s in sessions if day_stats.get(s.anonymous_id, (None, 1))[1] >= 2]
+
+    total = len(sessions)
+    page_rows = sessions[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
+
+    user_ids = {s.user_id for s in page_rows if s.user_id}
+    users_by_id = {u.public_id: u for u in User.query.filter(User.public_id.in_(user_ids)).all()} if user_ids else {}
+
+    def serialize(s):
+        day_count = day_stats.get(s.anonymous_id, (None, 1))[1]
+        user = users_by_id.get(s.user_id)
+        return {
+            'anonymous_id': s.anonymous_id[:12],
+            'user_name': user.profile_name if user else None,
+            'site': s.site or 'main',
+            'site_label': SITE_LABELS.get(s.site or 'main', s.site or 'main'),
+            'country': s.country or 'Unknown',
+            'first_seen': s.first_seen.isoformat() if s.first_seen else None,
+            'last_seen': s.last_seen.isoformat() if s.last_seen else None,
+            'page_view_count': s.page_view_count,
+            'days_active': day_count,
+            'is_returning': day_count >= 2,
+        }
+
+    return jsonify({
+        'sessions': [serialize(s) for s in page_rows],
+        'total': total,
+        'page': page,
+        'has_more': page * PAGE_SIZE < total,
+        'sites': SITE_LABELS,
+    })

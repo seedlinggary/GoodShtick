@@ -148,6 +148,29 @@ def get_post(current_user, identifier):
     return jsonify(make_post_schema(current_user).dump(post))
 
 
+@torah_post_api.route('/posts/<identifier>/seo', methods=['GET'])
+def get_post_seo(identifier):
+    """Same lookup as get_post, for the SEO meta-injection proxy (see
+    good-shtick/api/render.js) -- split out so a search crawler or link
+    unfurl hitting every post page doesn't inflate views_count alongside
+    genuine reader visits."""
+    query = TorahPost.query.options(*_feed_options())
+    post = query.filter_by(id=int(identifier)).first() if identifier.isdigit() else query.filter_by(slug=identifier).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+    return jsonify(TorahPostCardSchema().dump(post))
+
+
+@torah_post_api.route('/posts/sitemap-data', methods=['GET'])
+def posts_sitemap_data():
+    """Minimal {slug, updated} rows for every post -- same lean-query
+    pattern as the other sites' own sitemap_data()."""
+    rows = db.session.query(TorahPost.slug, TorahPost.pub_date).all()
+    return jsonify({
+        'posts': [{'slug': slug, 'updated': pub_date.isoformat() if pub_date else None} for slug, pub_date in rows],
+    })
+
+
 @torah_post_api.route('/posts', methods=['POST'])
 @token_required
 def create_post(current_user):
