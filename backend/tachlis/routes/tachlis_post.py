@@ -17,7 +17,10 @@ BODY_MAX = 8000
 CONTACT_MAX = 300
 LOCATION_MAX = 120
 COMPENSATION_MAX = 120
-EXPIRES_DAYS = 60
+# Per post_type lifetime -- resumes (job seekers) stay listed longer than
+# job openings. Same per-type-lifetime convention as Estates' own
+# sale-vs-rental split (see backend/estates/modals/estates.py).
+EXPIRES_DAYS = {'job': 60, 'resume': 90}
 
 
 def _feed_options():
@@ -29,51 +32,58 @@ def _admin_options():
 
 
 def _validate_post_fields(body, partial=False):
-    """Shared create/edit validation. Returns (errors_response_or_None, cleaned_fields)."""
+    """Shared create/edit validation. Returns (errors_response_or_None, cleaned_fields)
+    -- matches estates.py's _validate_listing_body convention: the error
+    response carries no status of its own (`, None`, not `, 400`), because
+    `return jsonify(...), 400` here would make THIS tuple itself the whole
+    (error, fields) pair the caller destructures -- splitting 400 into
+    `fields` instead of attaching it to the response, which silently made
+    every validation failure answer 200 OK. The caller re-attaches the
+    real status via `return error, 400`."""
     fields = {}
 
     if not partial or 'post_type' in body:
         post_type = (body.get('post_type') or '').strip().lower()
         if not post_type:
-            return jsonify({'message': 'post_type is required'}), 400
+            return jsonify({'message': 'post_type is required'}), None
         if post_type not in POST_TYPES:
-            return jsonify({'message': f'post_type must be one of: {", ".join(POST_TYPES)}'}), 400
+            return jsonify({'message': f'post_type must be one of: {", ".join(POST_TYPES)}'}), None
         fields['post_type'] = post_type
 
     if not partial or 'title' in body:
         title = (body.get('title') or '').strip()
         if not title:
-            return jsonify({'message': 'Title is required'}), 400
+            return jsonify({'message': 'Title is required'}), None
         if len(title) > TITLE_MAX:
-            return jsonify({'message': f'Title must be {TITLE_MAX} characters or fewer'}), 400
+            return jsonify({'message': f'Title must be {TITLE_MAX} characters or fewer'}), None
         fields['title'] = title
 
     if not partial or 'body' in body:
         text = (body.get('body') or '').strip()
         if not text:
-            return jsonify({'message': 'Body is required'}), 400
+            return jsonify({'message': 'Body is required'}), None
         if len(text) > BODY_MAX:
-            return jsonify({'message': f'Body must be {BODY_MAX} characters or fewer'}), 400
+            return jsonify({'message': f'Body must be {BODY_MAX} characters or fewer'}), None
         fields['body'] = text
 
     if not partial or 'contact' in body:
         contact = (body.get('contact') or '').strip()
         if not contact:
-            return jsonify({'message': 'Contact info is required'}), 400
+            return jsonify({'message': 'Contact info is required'}), None
         if len(contact) > CONTACT_MAX:
-            return jsonify({'message': f'Contact must be {CONTACT_MAX} characters or fewer'}), 400
+            return jsonify({'message': f'Contact must be {CONTACT_MAX} characters or fewer'}), None
         fields['contact'] = contact
 
     if 'location' in body:
         location = (body.get('location') or '').strip()
         if len(location) > LOCATION_MAX:
-            return jsonify({'message': f'Location must be {LOCATION_MAX} characters or fewer'}), 400
+            return jsonify({'message': f'Location must be {LOCATION_MAX} characters or fewer'}), None
         fields['location'] = location or None
 
     if 'compensation' in body:
         compensation = (body.get('compensation') or '').strip()
         if len(compensation) > COMPENSATION_MAX:
-            return jsonify({'message': f'Compensation must be {COMPENSATION_MAX} characters or fewer'}), 400
+            return jsonify({'message': f'Compensation must be {COMPENSATION_MAX} characters or fewer'}), None
         fields['compensation'] = compensation or None
 
     return None, fields
@@ -167,7 +177,7 @@ def create_post(current_user):
     body = request.get_json() or {}
     error, fields = _validate_post_fields(body, partial=False)
     if error:
-        return error
+        return error, 400
 
     post = TachlisPost(
         post_type=fields['post_type'],
@@ -177,8 +187,18 @@ def create_post(current_user):
         user_id=current_user.public_id,
         location=fields.get('location'),
         compensation=fields.get('compensation'),
-        expires_at=datetime.utcnow() + timedelta(days=EXPIRES_DAYS),
+        expires_at=datetime.utcnow() + timedelta(days=EXPIRES_DAYS[fields['post_type']]),
     )
+
+    # Same bypass create_shtick already uses for admin/super_admin posters --
+    # everyone else's post leaves approved_to_publish at its default (None,
+    # pending) for the moderation queue below. This is what lets an
+    # automated bot account (logged in as admin/super_admin) post listings
+    # that go live immediately instead of waiting on manual approval.
+    if current_user.is_boss:
+        post.approved_to_publish = True
+        post.approved_by = current_user.public_id
+
     db.session.add(post)
     db.session.commit()
     schema = make_tachlis_post_schema(current_user, many=False, card=False)
@@ -197,7 +217,7 @@ def edit_post(current_user, post_id):
     body = request.get_json() or {}
     error, fields = _validate_post_fields(body, partial=True)
     if error:
-        return error
+        return error, 400
 
     for key, value in fields.items():
         setattr(post, key, value)

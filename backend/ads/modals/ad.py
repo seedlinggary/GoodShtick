@@ -20,8 +20,12 @@ class Ad(db.Model):
     destination_type = db.Column(db.String(20), default='url')  # url, whatsapp, phone, email, internal
     destination_value = db.Column(db.String(500), nullable=False)
 
-    # Placement
-    placement = db.Column(db.String(30), default='feed')  # feed, games_hub
+    # Pages/placements this ad is allowed to appear on. Comma-separated list of
+    # VALID_PLACEMENTS values (see routes/ads.py); NULL/empty = every placement,
+    # same "unrestricted" convention as target_age_min/target_gender/
+    # target_countries below. This is what lets one ad be assigned to one or
+    # many pages across any site.
+    placements = db.Column(db.Text, nullable=True)
 
     # Targeting — null/empty on any field means "no restriction on that axis"
     target_age_min = db.Column(db.Integer, nullable=True)

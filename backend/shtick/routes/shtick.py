@@ -17,8 +17,6 @@ from backend.shtick.modals.generalc import Generalc
 from backend.shtick.schemas.shtick import shtick_schema, shticks_schema, shtick_feed_schema, shticks_feed_schema
 from backend.hock.modals.hock_post import HockPost
 from backend.hock.schemas.hock import make_post_schema as make_hock_post_schema
-from backend.tachlis.modals.tachlis_post import TachlisPost
-from backend.tachlis.schemas.tachlis import make_tachlis_post_schema
 import jwt
 from backend.user.modals.user import User
 from config import application
@@ -127,10 +125,8 @@ PAGE_SIZE = 10
 BOARD_BUCKET_SECONDS = 20 * 60  # how often the shuffle re-rolls
 RECENCY_TIER_HOURS = [2, 6, 24, 72]  # tier boundaries; anything older is the last tier
 HOCK_SLOT = 3      # 0-indexed position of the Hock pick within each 10-item page
-TACHLIS_SLOT = 7   # 0-indexed position of the Tachlis pick within each 10-item page
 BOARD_SHTICK_CANDIDATES = 200
 BOARD_HOCK_CANDIDATES = 40
-BOARD_TACHLIS_CANDIDATES = 30
 
 
 def _recency_tier(pub_date, now):
@@ -160,9 +156,12 @@ def _tiered_shuffle(rows, kind, now, bucket):
 
 def _board_feed_page(page, current_user=None, bucket=None):
     """One page of the mixed, recency-weighted board feed: mostly Shtick
-    posts in tiered-shuffled order, with one Hock pick and one Tachlis pick
-    folded into fixed slots on every page so cross-pollination is a steady
-    presence rather than a one-off strip at the very top.
+    posts in tiered-shuffled order, with one Hock pick folded into a fixed
+    slot on every page so cross-pollination is a steady presence rather
+    than a one-off strip at the very top. (Tachlis used to get a slot here
+    too -- removed once Tachlis moved to Gut Money; the new cross-site
+    Discover feed on the Gut Shtick homepage is what surfaces job posts
+    there now.)
 
     `bucket` defaults to the current rotating time window, but "Shake the
     board" (see the /shake_board route) passes an explicit random one so a
@@ -192,14 +191,7 @@ def _board_feed_page(page, current_user=None, bucket=None):
                   .limit(BOARD_HOCK_CANDIDATES).all())
     hock_posts = _tiered_shuffle(hock_posts, 'hock', now, bucket)
 
-    tachlis_posts = (TachlisPost.query
-                      .options(joinedload(TachlisPost.user))
-                      .filter_by(approved_to_publish=True)
-                      .order_by(TachlisPost.pub_date.desc())
-                      .limit(BOARD_TACHLIS_CANDIDATES).all())
-    tachlis_posts = _tiered_shuffle(tachlis_posts, 'tachlis', now, bucket)
-
-    shticks_per_page = PAGE_SIZE - (1 if hock_posts else 0) - (1 if tachlis_posts else 0)
+    shticks_per_page = PAGE_SIZE - (1 if hock_posts else 0)
     shtick_start = (page - 1) * shticks_per_page
     page_shticks = shticks[shtick_start:shtick_start + shticks_per_page]
 
@@ -207,21 +199,15 @@ def _board_feed_page(page, current_user=None, bucket=None):
     if hock_posts:
         pick = hock_posts[(page - 1) % len(hock_posts)]
         items.insert(min(HOCK_SLOT, len(items)), ('hock', pick))
-    if tachlis_posts:
-        pick = tachlis_posts[(page - 1) % len(tachlis_posts)]
-        items.insert(min(TACHLIS_SLOT, len(items)), ('tachlis', pick))
 
     hock_schema = make_hock_post_schema(current_user, card=True)
-    tachlis_schema = make_tachlis_post_schema(current_user, card=True)
 
     dumped = []
     for kind, obj in items:
         if kind == 'shtick':
             dumped.append({'kind': 'shtick', **shtick_feed_schema.dump(obj)})
-        elif kind == 'hock':
-            dumped.append({'kind': 'hock', **hock_schema.dump(obj)})
         else:
-            dumped.append({'kind': 'tachlis', **tachlis_schema.dump(obj)})
+            dumped.append({'kind': 'hock', **hock_schema.dump(obj)})
     return dumped
 
 
@@ -341,7 +327,7 @@ def shake_board():
     re-rolled with a fresh random shuffle bucket instead of the ambient
     rotating one -- so a click visibly reorders what's already on screen
     (new tiered-shuffle position within each recency band, a different
-    Hock/Tachlis pick) rather than waiting up to BOARD_BUCKET_SECONDS for
+    Hock pick) rather than waiting up to BOARD_BUCKET_SECONDS for
     the natural rotation, or (the old behavior) just teleporting to one
     unrelated post. Deliberately uncached for the same reason /random is --
     every click should have a real chance at a different order."""

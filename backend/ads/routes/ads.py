@@ -18,13 +18,43 @@ ads_api = Blueprint('ads_api', __name__, url_prefix='/ads')
 VALID_STATUSES = {'draft', 'active', 'paused', 'archived'}
 VALID_DESTINATION_TYPES = {'url', 'whatsapp', 'phone', 'email', 'internal'}
 VALID_PLACEMENTS = {'feed', 'games_hub', 'game_page', 'top', 'bottom', 'sidebar_left', 'sidebar_right',
-                     'business_directory', 'deals_feed', 'estates_listings', 'estates_group_buy'}
+                     'business_directory', 'deals_feed', 'estates_listings', 'estates_group_buy',
+                     'tachlis_board', 'torah_feed'}
 VALID_GENDERS = {'male', 'female', 'other'}
 
 
 def _visitor_country():
     """Vercel injects geo headers at the edge for every request; None outside Vercel (e.g. local dev)."""
     return request.headers.get('x-vercel-ip-country') or None
+
+
+def _is_local_request():
+    """True when this request came from the same machine running the Flask
+    process -- i.e. a local dev frontend talking to a local dev backend.
+    Real visitor traffic is always proxied in from the public internet (via
+    Vercel) and never shows up as 127.0.0.1/::1 here, so this is a safe,
+    zero-config way to keep local testing from inflating the impression/click
+    counts an advertiser would actually see in SuperAdmin's ad stats."""
+    return request.remote_addr in ('127.0.0.1', '::1')
+
+
+def _is_excluded_viewer(current_user):
+    """Skip impression/click logging for the site's own admin/super_admin
+    staff -- their browsing shouldn't inflate the numbers an advertiser
+    would see, in production just as much as in local testing. Covers:
+    actually logged in as admin/super_admin right now (current_user), or
+    this specific browser has logged in as one before -- the `x-admin-device`
+    header for /serve* (a real fetch() call, see ApiRequest.js) and the
+    `admin_device` query param for /click (a plain <a href> navigation can't
+    carry a custom header, see AdSlot.js's AdCard) both come from the same
+    persistent, never-logged-out localStorage flag set in auth.js's
+    saveAuth(). So the same person's browsing while logged out on that
+    device -- including before they've ever logged in for the very first
+    time on a brand new browser, which nothing server-side can know in
+    advance -- still doesn't count once that flag is set."""
+    if current_user and current_user.is_boss:
+        return True
+    return request.headers.get('x-admin-device') == '1' or request.args.get('admin_device') == '1'
 
 
 def _parse_dt(value):
@@ -55,13 +85,25 @@ def _matches_targeting(ad, age, gender, country):
     return True
 
 
+def _ad_targets_placement(ad, placement):
+    """NULL/empty `placements` means the ad is eligible for every placement
+    (the "All pages" choice in SuperAdmin) -- same unrestricted-on-empty
+    convention as the targeting axes above. Checked in Python rather than a
+    SQL LIKE so a placement name can't false-match as a substring of another
+    (e.g. 'feed' inside a hypothetical longer token)."""
+    if not ad.placements:
+        return True
+    return placement in {p.strip() for p in ad.placements.split(',') if p.strip()}
+
+
 def _pick_ad(placement, excluded_ids, now, age, gender, country):
     """Selects one eligible active ad for a placement via weighted random choice,
     or None if nothing qualifies. Shared by /serve and /serve_batch."""
-    candidates = Ad.query.filter_by(placement=placement, status='active').all()
+    candidates = Ad.query.filter_by(status='active').all()
     candidates = [
         a for a in candidates
-        if a.id not in excluded_ids
+        if _ad_targets_placement(a, placement)
+        and a.id not in excluded_ids
         and (a.start_date is None or a.start_date <= now)
         and (a.end_date is None or a.end_date >= now)
     ]
@@ -72,6 +114,8 @@ def _pick_ad(placement, excluded_ids, now, age, gender, country):
 
 
 def _log_impression(ad, placement, current_user, country):
+    if _is_local_request() or _is_excluded_viewer(current_user):
+        return
     try:
         db.session.add(AdImpression(
             ad_id=ad.id,
@@ -233,18 +277,19 @@ def click_ad(current_user, ad_id):
     if not ad:
         return redirect('/')
 
-    country = (current_user.location_country if current_user and current_user.location_country
-               else _visitor_country())
-    try:
-        db.session.add(AdClick(
-            ad_id=ad.id,
-            user_id=current_user.public_id if current_user else None,
-            country=country,
-        ))
-        ad.click_count = (ad.click_count or 0) + 1
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
+    if not _is_local_request() and not _is_excluded_viewer(current_user):
+        country = (current_user.location_country if current_user and current_user.location_country
+                   else _visitor_country())
+        try:
+            db.session.add(AdClick(
+                ad_id=ad.id,
+                user_id=current_user.public_id if current_user else None,
+                country=country,
+            ))
+            ad.click_count = (ad.click_count or 0) + 1
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
 
     return redirect(_build_destination(ad))
 
@@ -268,9 +313,10 @@ def create_ad(current_user):
     destination_type = body.get('destination_type', 'url')
     if destination_type not in VALID_DESTINATION_TYPES:
         return jsonify({'message': f'Invalid destination_type. Must be one of: {", ".join(VALID_DESTINATION_TYPES)}'}), 400
-    placement = body.get('placement', 'feed')
-    if placement not in VALID_PLACEMENTS:
-        return jsonify({'message': f'Invalid placement. Must be one of: {", ".join(VALID_PLACEMENTS)}'}), 400
+    placements_list = body.get('placements') or []
+    if not isinstance(placements_list, list) or not all(p in VALID_PLACEMENTS for p in placements_list):
+        return jsonify({'message': f'Invalid placements. Each must be one of: {", ".join(VALID_PLACEMENTS)}'}), 400
+    placements = ','.join(placements_list) or None  # empty/omitted == All pages
     target_gender = (body.get('target_gender') or '').lower() or None
     if target_gender and target_gender not in VALID_GENDERS:
         return jsonify({'message': f'Invalid target_gender. Must be one of: {", ".join(VALID_GENDERS)}'}), 400
@@ -285,7 +331,7 @@ def create_ad(current_user):
         cta_label=body.get('cta_label') or 'Learn More',
         destination_type=destination_type,
         destination_value=_normalize_destination_value(destination_type, body['destination_value']),
-        placement=placement,
+        placements=placements,
         target_age_min=body.get('target_age_min'),
         target_age_max=body.get('target_age_max'),
         target_gender=target_gender,
@@ -316,10 +362,11 @@ def update_ad(_current_user, ad_id):
         if body['destination_type'] not in VALID_DESTINATION_TYPES:
             return jsonify({'message': f'Invalid destination_type. Must be one of: {", ".join(VALID_DESTINATION_TYPES)}'}), 400
         ad.destination_type = body['destination_type']
-    if 'placement' in body:
-        if body['placement'] not in VALID_PLACEMENTS:
-            return jsonify({'message': f'Invalid placement. Must be one of: {", ".join(VALID_PLACEMENTS)}'}), 400
-        ad.placement = body['placement']
+    if 'placements' in body:
+        placements_list = body['placements'] or []
+        if not isinstance(placements_list, list) or not all(p in VALID_PLACEMENTS for p in placements_list):
+            return jsonify({'message': f'Invalid placements. Each must be one of: {", ".join(VALID_PLACEMENTS)}'}), 400
+        ad.placements = ','.join(placements_list) or None
     if 'target_gender' in body:
         tg = (body['target_gender'] or '').lower() or None
         if tg and tg not in VALID_GENDERS:

@@ -23,7 +23,7 @@ class AdSchema(Schema):
     cta_label = fields.Str()
     destination_type = fields.Str()
     destination_value = fields.Str()
-    placement = fields.Str()
+    placements = fields.Str()
     target_age_min = fields.Int()
     target_age_max = fields.Int()
     target_gender = fields.Str()
@@ -49,7 +49,6 @@ class AdServeSchema(Schema):
     headline = fields.Str()
     body_text = fields.Str()
     cta_label = fields.Str()
-    placement = fields.Str()
 
     def get_image_url(self, obj):
         return _safe_image_url(obj)

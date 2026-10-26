@@ -3,7 +3,7 @@ from datetime import datetime
 
 # Enforced at the Python/route level (not a Postgres enum) to match this
 # project's convention of avoiding DB-level enums elsewhere.
-POST_TYPES = ('job', 'resume', 'service')
+POST_TYPES = ('job', 'resume')
 
 
 class TachlisPost(db.Model):

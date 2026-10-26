@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import func
+from sqlalchemy import func, case
 from sqlalchemy.orm import selectinload
 
 from config import db
@@ -278,10 +278,33 @@ def list_listings(current_user):
 
     if sort == 'alpha':
         query = query.order_by(EstatesListing.title.asc())
-    elif sort == 'price_asc':
-        query = query.order_by(EstatesListing.price.asc().nulls_last())
-    elif sort == 'price_desc':
-        query = query.order_by(EstatesListing.price.desc().nulls_last())
+    elif sort in ('price_asc', 'price_desc'):
+        # Raw `price` alone mixes currencies ($/₪) and billing cadence
+        # (nightly/weekly/monthly rent, or a one-time sale lump sum) --
+        # comparing those numbers directly is meaningless (a ₪5,000/month
+        # rental's raw number has nothing to do with a $450,000 sale's).
+        # Normalizing currency (-> USD, via a fixed approximate rate -- a
+        # live FX rate would need its own fetch+cache infra for more
+        # precision than a sort order actually needs) and rental cadence
+        # (-> monthly-equivalent) makes "price" comparable within rentals
+        # and within sales. A sale (lump sum) vs. a rental (recurring cost)
+        # remains an inherently different kind of number no unit
+        # conversion can fix -- filtering to one listing type first is
+        # still the most meaningful way to sort by price.
+        usd_per_ils = 1 / 3.7
+        period_multiplier = case(
+            (EstatesListing.price_period == 'night', 30),
+            (EstatesListing.price_period == 'week', 4.33),
+            else_=1,
+        )
+        currency_multiplier = case(
+            (EstatesListing.currency == 'ILS', usd_per_ils),
+            else_=1,
+        )
+        normalized_price = EstatesListing.price * period_multiplier * currency_multiplier
+        query = query.order_by(normalized_price.asc().nulls_last() if sort == 'price_asc' else normalized_price.desc().nulls_last())
+    elif sort == 'newest':
+        query = query.order_by(EstatesListing.pub_date.desc())
     elif sort == 'distance':
         pass  # final ordering happens in Python below
     else:

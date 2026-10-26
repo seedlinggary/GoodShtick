@@ -48,6 +48,7 @@ class BusinessCardSchema(Schema):
     is_boosted = fields.Method('get_is_boosted')
     primary_location = fields.Method('get_primary_location')
     community_info = fields.Method('get_community_info')
+    pub_date = fields.DateTime()
 
     def get_logo_url(self, obj):
         return get_public_url(obj.logo) if obj.logo else None

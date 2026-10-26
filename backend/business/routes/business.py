@@ -322,6 +322,8 @@ def list_businesses(current_user):
         query = query.order_by(boost_first, Business.name.asc())
     elif sort == 'rating':
         query = query.order_by(boost_first, Business.rating_avg.desc(), Business.rating_count.desc())
+    elif sort == 'newest':
+        query = query.order_by(boost_first, Business.pub_date.desc())
     elif sort == 'distance':
         query = query.order_by(boost_first)  # final distance ordering happens in Python below
     else:
