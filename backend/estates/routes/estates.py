@@ -31,6 +31,51 @@ def _feed_options():
     return [selectinload(EstatesListing.photos), selectinload(EstatesListing.likes)]
 
 
+SQFT_TO_SQM = 0.092903
+MIN_COMPARABLES = 5
+BELOW_MARKET_THRESHOLD = 0.9  # listing must be at or under 90% of the area/room median
+
+
+def _add_price_context(listing):
+    """Attaches price_per_sqm/market_median_price/below_market_price as
+    transient (non-persisted) attributes, read by EstatesListingSchema's
+    own fields -- Stage 2 of gut_next_level_agent.md ("Price context").
+    Detail-page only (one listing, so one cheap aggregate query), not the
+    list feed, to avoid an aggregate-per-card cost on a page of 24."""
+    listing.price_per_sqm = None
+    listing.market_median_price = None
+    listing.below_market_price = None
+
+    if listing.price is not None and listing.size_value:
+        sqm = listing.size_value * SQFT_TO_SQM if listing.size_unit == 'sqft' else listing.size_value
+        if sqm:
+            listing.price_per_sqm = round(listing.price / sqm, 2)
+
+    area = listing.neighborhood or listing.city
+    if listing.price is None or listing.bedrooms is None or not area:
+        return
+
+    now = datetime.utcnow()
+    area_filter = (EstatesListing.neighborhood == area) if listing.neighborhood else (EstatesListing.city == area)
+    comparables = (EstatesListing.query
+                   .filter(EstatesListing.id != listing.id,
+                           EstatesListing.listing_type == listing.listing_type,
+                           EstatesListing.bedrooms == listing.bedrooms,
+                           EstatesListing.price.isnot(None),
+                           area_filter,
+                           db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)))
+    if comparables.count() < MIN_COMPARABLES:
+        return
+
+    median = comparables.with_entities(
+        func.percentile_cont(0.5).within_group(EstatesListing.price.asc())
+    ).scalar()
+    if median is None:
+        return
+    listing.market_median_price = round(median, 2)
+    listing.below_market_price = listing.price <= median * BELOW_MARKET_THRESHOLD
+
+
 def _can_manage(listing, user):
     if not user:
         return False
@@ -227,6 +272,91 @@ def list_neighborhoods():
     return jsonify({'neighborhoods': neighborhoods})
 
 
+def _resolve_area(area_slug):
+    """Finds the real neighborhood or city name matching this slug among
+    active listings -- free-text area names have no slug column of their
+    own, so this resolves slug -> exact name by scanning distinct active
+    values (a few hundred rows at most) the same way slugify() already
+    turns a listing's title into its own URL slug. Neighborhood checked
+    first since it's the more specific of the two (see /estates/listings'
+    own city-also-matches-neighborhood comment)."""
+    now = datetime.utcnow()
+    active = db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)
+    neighborhoods = (db.session.query(EstatesListing.neighborhood)
+                      .filter(EstatesListing.neighborhood.isnot(None), EstatesListing.neighborhood != '', active)
+                      .distinct().all())
+    for (n,) in neighborhoods:
+        if slugify(n) == area_slug:
+            return 'neighborhood', n
+    cities = (db.session.query(EstatesListing.city)
+              .filter(EstatesListing.city.isnot(None), EstatesListing.city != '', active)
+              .distinct().all())
+    for (c,) in cities:
+        if slugify(c) == area_slug:
+            return 'city', c
+    return None, None
+
+
+@estates_api.route('/areas', methods=['GET'])
+def list_areas():
+    """Every active area (neighborhood takes precedence over city, same
+    convention as _resolve_area) with its own listing count -- feeds the
+    sitemap (good-shtick/api/sitemap.js) and could seed an areas index page
+    later. Cheap: grouped counts, not a full listing scan."""
+    now = datetime.utcnow()
+    active = db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)
+    neighborhood_counts = dict(
+        db.session.query(EstatesListing.neighborhood, func.count(EstatesListing.id))
+        .filter(EstatesListing.neighborhood.isnot(None), EstatesListing.neighborhood != '', active)
+        .group_by(EstatesListing.neighborhood).all())
+    # Only count a city's listings toward its own area page when they don't
+    # already have a neighborhood (which gets its own, more specific page) --
+    # otherwise a city with well-covered neighborhoods would double-count
+    # the same listings under both.
+    city_counts = dict(
+        db.session.query(EstatesListing.city, func.count(EstatesListing.id))
+        .filter(EstatesListing.city.isnot(None), EstatesListing.city != '',
+                db.or_(EstatesListing.neighborhood.is_(None), EstatesListing.neighborhood == ''), active)
+        .group_by(EstatesListing.city).all())
+    areas = (
+        [{'area': n, 'area_slug': slugify(n), 'count': c} for n, c in neighborhood_counts.items()] +
+        [{'area': c, 'area_slug': slugify(c), 'count': n} for c, n in city_counts.items()]
+    )
+    return jsonify({'areas': areas})
+
+
+@estates_api.route('/areas/<area_slug>', methods=['GET'])
+def area_page(area_slug):
+    """Powers one "homes in <area>" landing page per area -- live count,
+    typical (median) price, and the newest 20 listings. Stage 2 of
+    gut_next_level_agent.md ("Neighborhood and city pages")."""
+    field, name = _resolve_area(area_slug)
+    if not name:
+        return jsonify({'message': 'Area not found'}), 404
+
+    now = datetime.utcnow()
+    col = EstatesListing.neighborhood if field == 'neighborhood' else EstatesListing.city
+    base_filter = db.and_(col == name, db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+
+    count = EstatesListing.query.filter(base_filter).count()
+    by_type = dict(
+        db.session.query(EstatesListing.listing_type, func.count(EstatesListing.id))
+        .filter(base_filter).group_by(EstatesListing.listing_type).all())
+    median_price = (db.session.query(func.percentile_cont(0.5).within_group(EstatesListing.price.asc()))
+                     .filter(base_filter, EstatesListing.price.isnot(None)).scalar())
+    listings = (EstatesListing.query.options(*_feed_options())
+                .filter(base_filter)
+                .order_by(db.func.coalesce(EstatesListing.source_posted_at, EstatesListing.pub_date).desc())
+                .limit(20).all())
+
+    return jsonify({
+        'area': name, 'area_slug': area_slug, 'area_type': field,
+        'count': count, 'by_type': by_type,
+        'typical_price': round(median_price, 2) if median_price is not None else None,
+        'listings': EstatesListingCardSchema(many=True).dump(listings),
+    })
+
+
 @estates_api.route('/listings', methods=['GET'])
 @token_optional
 def list_listings(current_user):
@@ -383,6 +513,7 @@ def get_listing(current_user, identifier):
         return jsonify({'message': 'Listing not found'}), 404
     listing.views_count = (listing.views_count or 0) + 1
     db.session.commit()
+    _add_price_context(listing)
     return jsonify(make_listing_schema(current_user).dump(listing))
 
 

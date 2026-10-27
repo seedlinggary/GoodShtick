@@ -17,7 +17,7 @@ per-branch CAST/NULL-AS projections just to align column lists, and
 Postgres still couldn't push one ORDER BY/LIMIT through a UNION ALL of five
 differently-filtered subqueries without materializing all of them anyway --
 no performance win being given up by doing it in Python instead."""
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy.orm import selectinload
@@ -213,3 +213,61 @@ def aggregate(_current_user):
     items = page_slice[:PAGE_SIZE]
 
     return jsonify({'items': items, 'page': page, 'has_more': has_more})
+
+
+TODAY_WINDOW_HOURS = 24
+TODAY_CAP = 200
+
+
+def _is_today(model):
+    """The time a row actually went up in its source WhatsApp group when
+    known, falling back to when it was added here -- same coalesce as each
+    model's own "newest" sort (see estates.py/tachlis_post.py)."""
+    cutoff = datetime.utcnow() - timedelta(hours=TODAY_WINDOW_HOURS)
+    return db.func.coalesce(model.source_posted_at, model.pub_date) > cutoff
+
+
+@feed_api.route('/today', methods=['GET'])
+def today():
+    """Powers "Today on GUT" -- every Estates listing and Tachlis job/resume
+    posted in the last 24 hours, grouped by area (Estates) and category
+    (Tachlis) client-side from this flat list. No auth, no pagination: this
+    is meant to be one glance-able, shareable page, not a deep feed."""
+    now = datetime.utcnow()
+
+    estates_rows = (EstatesListing.query
+                     .options(selectinload(EstatesListing.photos))
+                     .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+                     .filter(_is_today(EstatesListing))
+                     .order_by(db.func.coalesce(EstatesListing.source_posted_at, EstatesListing.pub_date).desc())
+                     .limit(TODAY_CAP)
+                     .all())
+    estates_items = [{
+        'id': l.id, 'slug': l.slug, 'title': l.title,
+        'listing_type': l.listing_type,
+        'area': l.neighborhood or l.city or l.country,
+        'price': l.price, 'currency': l.currency, 'price_period': l.price_period,
+        'cover_photo_url': get_public_url(l.photos[0].filename) if l.photos else None,
+        'pub_date': (l.source_posted_at or l.pub_date).isoformat() if (l.source_posted_at or l.pub_date) else None,
+    } for l in estates_rows]
+
+    jobs_rows = (TachlisPost.query
+                 .filter(TachlisPost.approved_to_publish.is_(True))
+                 .filter(db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now))
+                 .filter(_is_today(TachlisPost))
+                 .order_by(db.func.coalesce(TachlisPost.source_posted_at, TachlisPost.pub_date).desc())
+                 .limit(TODAY_CAP)
+                 .all())
+    jobs_items = [{
+        'id': p.id, 'title': p.title, 'post_type': p.post_type,
+        'category': p.category, 'location': p.location, 'compensation': p.compensation,
+        'remote': p.remote,
+        'pub_date': (p.source_posted_at or p.pub_date).isoformat() if (p.source_posted_at or p.pub_date) else None,
+    } for p in jobs_rows]
+
+    return jsonify({
+        'generated_at': now.isoformat(),
+        'window_hours': TODAY_WINDOW_HOURS,
+        'estates': estates_items,
+        'jobs': jobs_items,
+    })

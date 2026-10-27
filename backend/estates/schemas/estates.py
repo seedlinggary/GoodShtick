@@ -83,6 +83,13 @@ class EstatesListingSchema(Schema):
 
     attributes = fields.Raw(allow_none=True)
 
+    # Transient, computed only on the detail-page lookup (see
+    # routes/estates.py's _add_price_context) -- None on every other path
+    # that dumps this schema, including a freshly-created/edited listing.
+    price_per_sqm = fields.Float(allow_none=True)
+    market_median_price = fields.Float(allow_none=True)
+    below_market_price = fields.Bool(allow_none=True)
+
     photos = fields.Method('get_photos')
     is_expired = fields.Bool()
     expires_at = fields.DateTime(allow_none=True)

@@ -110,6 +110,79 @@ def _validate_post_fields(body, partial=False):
     return None, fields
 
 
+def _slugify(name):
+    """Matches backend/estates/modals/estates.py's own slugify() exactly --
+    kept local rather than importing across blueprints for one tiny helper,
+    same call so area slugs resolve identically either site."""
+    import re
+    import unicodedata
+    normalized = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
+    slug = re.sub(r'[^a-z0-9]+', '-', normalized.lower()).strip('-')
+    return slug or 'area'
+
+
+def _resolve_location(location_slug):
+    """Same slug->exact-name resolution as estates.py's _resolve_area, over
+    TachlisPost.location (the one area field this model has, no separate
+    neighborhood/city split)."""
+    now = datetime.utcnow()
+    active = (TachlisPost.approved_to_publish.is_(True),
+              db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now))
+    locations = (db.session.query(TachlisPost.location)
+                 .filter(TachlisPost.location.isnot(None), TachlisPost.location != '', *active)
+                 .distinct().all())
+    for (loc,) in locations:
+        if _slugify(loc) == location_slug:
+            return loc
+    return None
+
+
+@tachlis_api.route('/areas', methods=['GET'])
+def list_areas():
+    """Every active job location with its own post count -- feeds the
+    sitemap (good-shtick/api/sitemap.js)."""
+    now = datetime.utcnow()
+    counts = dict(
+        db.session.query(TachlisPost.location, db.func.count(TachlisPost.id))
+        .filter(TachlisPost.approved_to_publish.is_(True),
+                db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now),
+                TachlisPost.location.isnot(None), TachlisPost.location != '')
+        .group_by(TachlisPost.location).all())
+    areas = [{'area': loc, 'area_slug': _slugify(loc), 'count': c} for loc, c in counts.items()]
+    return jsonify({'areas': areas})
+
+
+@tachlis_api.route('/areas/<location_slug>', methods=['GET'])
+def area_page(location_slug):
+    """Powers one "jobs in <location>" landing page per area -- live count
+    and the newest 20 posts, grouped by category client-side. Stage 2 of
+    gut_next_level_agent.md ("Neighborhood and city pages")."""
+    name = _resolve_location(location_slug)
+    if not name:
+        return jsonify({'message': 'Area not found'}), 404
+
+    now = datetime.utcnow()
+    base_filter = db.and_(
+        TachlisPost.location == name, TachlisPost.approved_to_publish.is_(True),
+        db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now))
+
+    count = TachlisPost.query.filter(base_filter).count()
+    by_type = dict(
+        db.session.query(TachlisPost.post_type, db.func.count(TachlisPost.id))
+        .filter(base_filter).group_by(TachlisPost.post_type).all())
+    posts = (TachlisPost.query.options(*_feed_options())
+             .filter(base_filter)
+             .order_by(db.func.coalesce(TachlisPost.source_posted_at, TachlisPost.pub_date).desc())
+             .limit(20).all())
+
+    schema = make_tachlis_post_schema(None, many=True, card=True)
+    return jsonify({
+        'area': name, 'area_slug': location_slug,
+        'count': count, 'by_type': by_type,
+        'posts': schema.dump(posts),
+    })
+
+
 @tachlis_api.route('/posts', methods=['GET'])
 @token_optional
 def list_posts(current_user):
