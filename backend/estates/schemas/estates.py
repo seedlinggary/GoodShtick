@@ -41,6 +41,7 @@ class EstatesListingCardSchema(Schema):
     is_expired = fields.Bool()
     expires_at = fields.DateTime(allow_none=True)
     pub_date = fields.DateTime()
+    source_posted_at = fields.DateTime(allow_none=True)
 
     def get_cover_photo_url(self, obj):
         if not obj.photos:

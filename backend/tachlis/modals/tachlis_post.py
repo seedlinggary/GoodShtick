@@ -18,9 +18,23 @@ class TachlisPost(db.Model):
     compensation = db.Column(db.String(120), nullable=True)
     user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False, index=True)
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    # When this post actually went up in its source WhatsApp group --
+    # distinct from pub_date (when it was added to this DB). NULL for posts
+    # made directly on-site, or any older imported post from before this
+    # field existed; "newest" sorting falls back to pub_date in that case
+    # (see routes/tachlis_post.py's list_posts), so this is purely additive.
+    source_posted_at = db.Column(db.DateTime, nullable=True, index=True)
     approved_to_publish = db.Column(db.Boolean, default=None)
     approved_by = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=True)
     expires_at = db.Column(db.DateTime, nullable=True)
+    # Free-text job category (e.g. "Tech", "Healthcare", "Education") --
+    # same free-text-not-enum convention as `location` below; only
+    # meaningful for post_type='job' but not enforced, since a resume may
+    # also want to say what field it's in.
+    category = db.Column(db.String(60), nullable=True, index=True)
+    # Only meaningful for jobs; None means "not specified" (same convention
+    # as EstatesListing.is_agent) rather than implying on-site.
+    remote = db.Column(db.Boolean, nullable=True, index=True)
 
     __table_args__ = (
         # Matches the exact filter+sort pattern used by the public listing
@@ -35,7 +49,8 @@ class TachlisPost(db.Model):
                                 backref=db.backref('approved_tachlis_posts', lazy=True))
 
     def __init__(self, post_type, title, body, contact, user_id,
-                 location=None, compensation=None, expires_at=None):
+                 location=None, compensation=None, expires_at=None,
+                 category=None, remote=None, source_posted_at=None):
         self.post_type = post_type
         self.title = title
         self.body = body
@@ -44,6 +59,9 @@ class TachlisPost(db.Model):
         self.location = location
         self.compensation = compensation
         self.expires_at = expires_at
+        self.category = category
+        self.remote = remote
+        self.source_posted_at = source_posted_at
 
     def __repr__(self):
         return f'TachlisPost({self.id}) [{self.post_type}] {self.title}'

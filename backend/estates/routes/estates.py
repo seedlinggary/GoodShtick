@@ -153,6 +153,16 @@ def _validate_listing_body(body, partial=False, existing=None):
             return jsonify({'message': 'attributes must be an object'}), None
         fields['attributes'] = attributes
 
+    if 'source_posted_at' in body:
+        raw = body.get('source_posted_at')
+        if raw:
+            try:
+                fields['source_posted_at'] = datetime.fromisoformat(raw)
+            except (TypeError, ValueError):
+                return jsonify({'message': 'source_posted_at must be an ISO 8601 datetime'}), None
+        else:
+            fields['source_posted_at'] = None
+
     return None, fields
 
 
@@ -202,6 +212,21 @@ def estates_stats():
     })
 
 
+@estates_api.route('/neighborhoods', methods=['GET'])
+def list_neighborhoods():
+    """Distinct, non-empty neighborhoods among active (non-expired)
+    listings, for the directory's neighborhood filter dropdown -- same
+    pattern as /tachlis/locations."""
+    now = datetime.utcnow()
+    rows = (db.session.query(EstatesListing.neighborhood)
+            .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+            .filter(EstatesListing.neighborhood.isnot(None), EstatesListing.neighborhood != '')
+            .distinct()
+            .all())
+    neighborhoods = sorted({n for (n,) in rows}, key=str.lower)
+    return jsonify({'neighborhoods': neighborhoods})
+
+
 @estates_api.route('/listings', methods=['GET'])
 @token_optional
 def list_listings(current_user):
@@ -211,6 +236,7 @@ def list_listings(current_user):
     only caller that ever needs that) to see them."""
     listing_type = (request.args.get('listing_type') or '').strip().lower()
     city = (request.args.get('city') or '').strip()
+    neighborhood = (request.args.get('neighborhood') or '').strip()
     country = (request.args.get('country') or '').strip()
     q = (request.args.get('q') or '').strip()
     agent_only = request.args.get('agent_only') in ('1', 'true', 'True')
@@ -225,6 +251,11 @@ def list_listings(current_user):
         max_price = float(request.args.get('max_price')) if request.args.get('max_price') not in (None, '') else None
     except (TypeError, ValueError):
         return jsonify({'message': 'min_price/max_price must be numbers'}), 400
+    try:
+        min_bedrooms = float(request.args.get('min_bedrooms')) if request.args.get('min_bedrooms') not in (None, '') else None
+        max_bedrooms = float(request.args.get('max_bedrooms')) if request.args.get('max_bedrooms') not in (None, '') else None
+    except (TypeError, ValueError):
+        return jsonify({'message': 'min_bedrooms/max_bedrooms must be numbers'}), 400
 
     near_lat = near_lng = None
     if sort == 'distance':
@@ -248,6 +279,11 @@ def list_listings(current_user):
         # necessarily know (or care) which of the two fields it landed in.
         like = f'%{city}%'
         query = query.filter(db.or_(EstatesListing.city.ilike(like), EstatesListing.neighborhood.ilike(like)))
+    if neighborhood:
+        # A dedicated, exact-ish filter (vs. city's broad substring match
+        # above) for the "neighborhood" dropdown/chip -- see
+        # /estates/neighborhoods below for where its options come from.
+        query = query.filter(EstatesListing.neighborhood.ilike(neighborhood))
     if country:
         query = query.filter(EstatesListing.country.ilike(f'%{country}%'))
     if agent_only:
@@ -258,6 +294,10 @@ def list_listings(current_user):
         query = query.filter(EstatesListing.price.isnot(None), EstatesListing.price >= min_price)
     if max_price is not None:
         query = query.filter(EstatesListing.price.isnot(None), EstatesListing.price <= max_price)
+    if min_bedrooms is not None:
+        query = query.filter(EstatesListing.bedrooms.isnot(None), EstatesListing.bedrooms >= min_bedrooms)
+    if max_bedrooms is not None:
+        query = query.filter(EstatesListing.bedrooms.isnot(None), EstatesListing.bedrooms <= max_bedrooms)
     if q:
         like = f'%{q}%'
         query = query.filter(db.or_(
@@ -304,7 +344,11 @@ def list_listings(current_user):
         normalized_price = EstatesListing.price * period_multiplier * currency_multiplier
         query = query.order_by(normalized_price.asc().nulls_last() if sort == 'price_asc' else normalized_price.desc().nulls_last())
     elif sort == 'newest':
-        query = query.order_by(EstatesListing.pub_date.desc())
+        # The time it actually went up in its source WhatsApp group when
+        # known (Tab's daily imports), falling back to pub_date (when it
+        # was added here) for on-site posts or older imports from before
+        # source_posted_at existed -- see EstatesListing.source_posted_at.
+        query = query.order_by(func.coalesce(EstatesListing.source_posted_at, EstatesListing.pub_date).desc())
     elif sort == 'distance':
         pass  # final ordering happens in Python below
     else:

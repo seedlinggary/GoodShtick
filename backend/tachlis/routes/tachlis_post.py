@@ -17,6 +17,7 @@ BODY_MAX = 8000
 CONTACT_MAX = 300
 LOCATION_MAX = 120
 COMPENSATION_MAX = 120
+CATEGORY_MAX = 60
 # Per post_type lifetime -- resumes (job seekers) stay listed longer than
 # job openings. Same per-type-lifetime convention as Estates' own
 # sale-vs-rental split (see backend/estates/modals/estates.py).
@@ -86,17 +87,47 @@ def _validate_post_fields(body, partial=False):
             return jsonify({'message': f'Compensation must be {COMPENSATION_MAX} characters or fewer'}), None
         fields['compensation'] = compensation or None
 
+    if 'category' in body:
+        category = (body.get('category') or '').strip()
+        if len(category) > CATEGORY_MAX:
+            return jsonify({'message': f'Category must be {CATEGORY_MAX} characters or fewer'}), None
+        fields['category'] = category or None
+
+    if 'remote' in body:
+        val = body.get('remote')
+        fields['remote'] = None if val is None else bool(val)
+
+    if 'source_posted_at' in body:
+        raw = body.get('source_posted_at')
+        if raw:
+            try:
+                fields['source_posted_at'] = datetime.fromisoformat(raw)
+            except (TypeError, ValueError):
+                return jsonify({'message': 'source_posted_at must be an ISO 8601 datetime'}), None
+        else:
+            fields['source_posted_at'] = None
+
     return None, fields
 
 
 @tachlis_api.route('/posts', methods=['GET'])
 @token_optional
 def list_posts(current_user):
-    """Public board listing. Approved only, excludes expired, most-recent-first.
+    """Public board listing. Approved only, excludes expired.
     ?type=job|resume|service filters; ?page=1.. paginates; ?q=search-term filters
-    by title/body/location/compensation/contact/author name or an exact id."""
+    by title/body/location/compensation/contact/author name or an exact id;
+    ?location=exact-value filters to one of the distinct values /tachlis/locations
+    returns; ?category=exact-value filters to one of the distinct values
+    /tachlis/categories returns; ?remote=1 filters to remote-only jobs;
+    ?has_pay=1 filters to posts with a compensation value set;
+    ?sort=newest|oldest controls order (default newest)."""
     post_type = (request.args.get('type') or '').strip().lower()
     q = (request.args.get('q') or '').strip()
+    location = (request.args.get('location') or '').strip()
+    category = (request.args.get('category') or '').strip()
+    remote_only = request.args.get('remote') == '1'
+    has_pay = request.args.get('has_pay') == '1'
+    sort = (request.args.get('sort') or 'newest').strip().lower()
     try:
         page = max(1, int(request.args.get('page', 1)))
     except (TypeError, ValueError):
@@ -113,6 +144,18 @@ def list_posts(current_user):
             return jsonify({'message': f'type must be one of: {", ".join(POST_TYPES)}'}), 400
         query = query.filter(TachlisPost.post_type == post_type)
 
+    if location:
+        query = query.filter(TachlisPost.location.ilike(location))
+
+    if category:
+        query = query.filter(TachlisPost.category.ilike(category))
+
+    if remote_only:
+        query = query.filter(TachlisPost.remote.is_(True))
+
+    if has_pay:
+        query = query.filter(TachlisPost.compensation.isnot(None), TachlisPost.compensation != '')
+
     if q:
         like = f'%{q}%'
         filters = [
@@ -124,8 +167,14 @@ def list_posts(current_user):
             filters.append(TachlisPost.id == int(q))
         query = query.join(TachlisPost.user).filter(db.or_(*filters))
 
+    # The time it actually went up in its source WhatsApp group when known
+    # (Tab's daily imports), falling back to pub_date for on-site posts or
+    # older imports from before source_posted_at existed -- see
+    # TachlisPost.source_posted_at.
+    newest_key = db.func.coalesce(TachlisPost.source_posted_at, TachlisPost.pub_date)
+    order = newest_key.asc() if sort == 'oldest' else newest_key.desc()
     rows = (query
-            .order_by(TachlisPost.pub_date.desc())
+            .order_by(order)
             .limit(PAGE_SIZE + 1)
             .offset((page - 1) * PAGE_SIZE)
             .all())
@@ -134,6 +183,37 @@ def list_posts(current_user):
 
     schema = make_tachlis_post_schema(current_user, many=True, card=True)
     return jsonify({'posts': schema.dump(posts), 'page': page, 'has_more': has_more})
+
+
+@tachlis_api.route('/locations', methods=['GET'])
+def list_locations():
+    """Distinct, non-empty locations among approved/non-expired posts, for the
+    board's location filter dropdown -- small board, cheap to compute fresh
+    on every call rather than caching."""
+    now = datetime.utcnow()
+    rows = (db.session.query(TachlisPost.location)
+            .filter(TachlisPost.approved_to_publish.is_(True))
+            .filter(db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now))
+            .filter(TachlisPost.location.isnot(None), TachlisPost.location != '')
+            .distinct()
+            .all())
+    locations = sorted({loc for (loc,) in rows}, key=str.lower)
+    return jsonify({'locations': locations})
+
+
+@tachlis_api.route('/categories', methods=['GET'])
+def list_categories():
+    """Distinct, non-empty categories among approved/non-expired posts, for
+    the board's category filter dropdown -- same pattern as /tachlis/locations."""
+    now = datetime.utcnow()
+    rows = (db.session.query(TachlisPost.category)
+            .filter(TachlisPost.approved_to_publish.is_(True))
+            .filter(db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now))
+            .filter(TachlisPost.category.isnot(None), TachlisPost.category != '')
+            .distinct()
+            .all())
+    categories = sorted({c for (c,) in rows}, key=str.lower)
+    return jsonify({'categories': categories})
 
 
 @tachlis_api.route('/posts/<int:post_id>', methods=['GET'])
@@ -187,6 +267,9 @@ def create_post(current_user):
         user_id=current_user.public_id,
         location=fields.get('location'),
         compensation=fields.get('compensation'),
+        category=fields.get('category'),
+        remote=fields.get('remote'),
+        source_posted_at=fields.get('source_posted_at'),
         expires_at=datetime.utcnow() + timedelta(days=EXPIRES_DAYS[fields['post_type']]),
     )
 

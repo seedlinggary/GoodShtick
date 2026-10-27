@@ -87,6 +87,14 @@ class EstatesListing(db.Model):
     created_by = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=True, index=True)
 
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    # When this listing was actually posted in its source WhatsApp group --
+    # distinct from pub_date (when it was added to this DB), which for a
+    # bulk-imported listing can lag the real post by hours. NULL for
+    # listings posted directly on-site (there's no separate "source" for
+    # those) or any older imported listing from before this field existed;
+    # "newest" sorting falls back to pub_date in that case (see
+    # routes/estates.py's list_listings), so this is purely additive.
+    source_posted_at = db.Column(db.DateTime, nullable=True, index=True)
     expires_at = db.Column(db.DateTime, nullable=True, index=True)
     renewed_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
     views_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
