@@ -69,3 +69,19 @@ class Alert(db.Model):
 
     def __repr__(self):
         return f'Alert({self.id}) [{self.search_type}] {self.email}'
+
+
+class AlertDigestSchedule(db.Model):
+    """Single-row table (id is always 1) holding when the daily digest job
+    should actually send, in Israel local time -- edited by a super admin
+    from SuperAdminDashboard with no redeploy needed (see routes/alert.py's
+    _get_schedule()/_maybe_run_scheduled_digest()). last_run_date is the
+    watermark that keeps a frequently-polling external scheduler (or the
+    opportunistic sweep) from sending twice on the same calendar day."""
+    __tablename__ = 'alert_digest_schedule'
+
+    id = db.Column(db.Integer, primary_key=True)
+    send_hour = db.Column(db.Integer, nullable=False, default=9, server_default='9')
+    send_minute = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    last_run_date = db.Column(db.Date, nullable=True)
+    updated_at = db.Column(db.DateTime, nullable=True)

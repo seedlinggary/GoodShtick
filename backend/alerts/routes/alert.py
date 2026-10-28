@@ -1,31 +1,53 @@
 """Stage 3 of gut_next_level_agent.md ("Alerts, the reason to come back").
 
-No Vercel-native cron wiring here, on purpose -- see
-backend/analytics/routes/visitor.py's own comment on why this codebase
-avoids shipping a Vercel cron schema nobody can verify against a real
-deploy without a live test. Follows the exact pattern already proven in
-backend/business/routes/social.py instead: a secret-protected endpoint for
-a real external scheduler (point cron-job.org or similar at
-POST /alerts/cron/send-digests with an X-Cron-Secret header, reusing the
-same CRON_SECRET env var social.py's own cron already needs), PLUS an
-opportunistic low-probability sweep hooked into a high-traffic route
-(see maybe_send_digests(), called from tachlis_post.py's list_posts) so
-the feature still works with zero extra setup, just looser timing.
+No Vercel-native cron wiring here, on purpose -- Vercel Cron Jobs are
+defined in vercel.json and can only be changed by editing that file and
+redeploying (no live/dashboard-only reschedule), and on the Hobby plan are
+capped at one *loosely timed* invocation per day (can land anywhere in the
+target hour), which can't honor an exact, admin-editable send time. See
+also backend/analytics/routes/visitor.py's own comment on why this
+codebase avoids shipping a Vercel cron schema nobody can verify against a
+real deploy without a live test.
+
+Instead: a secret-protected endpoint for a real external scheduler (point
+cron-job.org or similar at POST /alerts/cron/send-digests every few
+minutes with an X-Cron-Secret header, reusing the same CRON_SECRET env var
+social.py's own cron already needs), PLUS an opportunistic low-probability
+sweep hooked into a high-traffic route (see maybe_send_digests(), called
+from tachlis_post.py's list_posts) so the feature still works with zero
+extra setup, just looser timing. Both paths are just ordinary calls into
+this same Flask app, so neither depends on any Vercel-specific feature --
+nothing here can "break on Vercel".
+
+Neither path sends immediately, though -- both are gated by
+_maybe_run_scheduled_digest() against AlertDigestSchedule, a one-row table
+holding an Israel-local send_hour/send_minute a super admin can edit any
+time via PATCH /alerts/admin/schedule (SuperAdminDashboard), with zero
+redeploy. The external scheduler's own interval never needs to change when
+that time does -- it just needs to ping often enough (e.g. every 15 min)
+to catch the window soon after it opens; last_run_date keeps repeated pings
+across the same day from sending twice.
 """
 import os
 import random
 import re
-from datetime import datetime
+from datetime import datetime, time
 from urllib.parse import parse_qsl
+from zoneinfo import ZoneInfo
 
 from flask import Blueprint, jsonify, request
 from werkzeug.datastructures import MultiDict
 
 from config import db
-from security import token_required, token_optional, cron_secret_required
-from backend.alerts.modals.alert import Alert, SEARCH_TYPES
+from security import token_required, token_optional, cron_secret_required, super_admin_required
+from backend.alerts.modals.alert import Alert, AlertDigestSchedule, SEARCH_TYPES
 from backend.alerts.schemas.alert import alert_schema, alerts_schema
 from backend.alerts import emails
+
+# The digest's "send at" time is interpreted in this zone regardless of
+# where the cron ping or the opportunistic sweep's request actually
+# originates -- see AlertDigestSchedule / _maybe_run_scheduled_digest().
+ISRAEL_TZ = ZoneInfo('Asia/Jerusalem')
 
 alerts_api = Blueprint('alerts_api', __name__, url_prefix='/alerts')
 
@@ -248,6 +270,17 @@ def _matches_for_alert(alert):
     return items
 
 
+def _get_schedule():
+    """Get-or-create the single schedule row (id=1). Created lazily here
+    rather than via a data migration so a fresh/test DB never needs seeding."""
+    schedule = db.session.get(AlertDigestSchedule, 1)
+    if not schedule:
+        schedule = AlertDigestSchedule(id=1)
+        db.session.add(schedule)
+        db.session.commit()
+    return schedule
+
+
 def _run_digests():
     """The actual matching/send job -- shared by the cron endpoint and the
     opportunistic sweep below. Never sends a post twice: each alert's
@@ -289,19 +322,83 @@ def _run_digests():
     return {'alerts_checked': len(alerts), 'emails_sent': sent_emails, 'alerts_notified': sent_alerts}
 
 
+def _maybe_run_scheduled_digest():
+    """The shared gate behind both the cron endpoint and the opportunistic
+    sweep: actually sends only once a day, at/after the super-admin-set
+    local time in Israel -- everything that pings this (an external
+    scheduler firing every few minutes, or the low-probability sweep) can
+    safely call it as often as it likes. Returns a dict either way, never
+    raises -- a bad schedule row should never break a request it's piggybacking on."""
+    schedule = _get_schedule()
+    now_local = datetime.now(ISRAEL_TZ)
+    if schedule.last_run_date == now_local.date():
+        return {'skipped': 'already sent today'}
+    if now_local.time() < time(schedule.send_hour, schedule.send_minute):
+        return {'skipped': 'not due yet', 'send_at': f'{schedule.send_hour:02d}:{schedule.send_minute:02d} Israel time'}
+    result = _run_digests()
+    schedule.last_run_date = now_local.date()
+    db.session.commit()
+    return result
+
+
 @alerts_api.route('/cron/send-digests', methods=['POST'])
 @cron_secret_required
 def send_digests_cron():
-    return jsonify(_run_digests())
+    return jsonify(_maybe_run_scheduled_digest())
 
 
 def maybe_send_digests():
     """Opportunistic fallback -- see module docstring. Call from a
     high-traffic route; never raises, never blocks the request that
-    triggered it."""
+    triggered it. Still gated by the same daily schedule as the cron
+    endpoint -- this is just an extra chance to notice "it's due," not a
+    second, independent send path."""
     if random.random() >= OPPORTUNISTIC_CHANCE:
         return
     try:
-        _run_digests()
+        _maybe_run_scheduled_digest()
     except Exception:
         pass
+
+
+@alerts_api.route('/admin/schedule', methods=['GET'])
+@super_admin_required
+def get_digest_schedule(_current_user):
+    s = _get_schedule()
+    return jsonify({
+        'send_hour': s.send_hour,
+        'send_minute': s.send_minute,
+        'timezone': 'Asia/Jerusalem',
+        'last_run_date': s.last_run_date.isoformat() if s.last_run_date else None,
+    })
+
+
+@alerts_api.route('/admin/schedule', methods=['PATCH'])
+@super_admin_required
+def update_digest_schedule(_current_user):
+    body = request.get_json(silent=True) or {}
+    hour = body.get('send_hour')
+    minute = body.get('send_minute', 0)
+    if not isinstance(hour, int) or not (0 <= hour <= 23):
+        return jsonify({'message': 'send_hour must be an integer 0-23'}), 400
+    if not isinstance(minute, int) or not (0 <= minute <= 59):
+        return jsonify({'message': 'send_minute must be an integer 0-59'}), 400
+    s = _get_schedule()
+    s.send_hour = hour
+    s.send_minute = minute
+    s.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'send_hour': s.send_hour, 'send_minute': s.send_minute, 'timezone': 'Asia/Jerusalem'})
+
+
+@alerts_api.route('/admin/run-now', methods=['POST'])
+@super_admin_required
+def run_digests_now(_current_user):
+    """Manual override for testing/verification -- bypasses the schedule
+    gate entirely (but still updates last_run_date, so the regularly
+    scheduled run today becomes a no-op instead of double-sending)."""
+    result = _run_digests()
+    s = _get_schedule()
+    s.last_run_date = datetime.now(ISRAEL_TZ).date()
+    db.session.commit()
+    return jsonify(result)
