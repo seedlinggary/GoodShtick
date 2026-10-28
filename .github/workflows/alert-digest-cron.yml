@@ -1,0 +1,26 @@
+name: Alert Digest Cron
+
+# Pings the alert digest endpoint every 15 minutes so AlertDigestSchedule's
+# daily/weekly send times (set by a super admin in-app, no redeploy needed)
+# actually get checked close to when they're due. See
+# backend/alerts/routes/alert.py's _maybe_run_scheduled_digest() for the
+# gating logic this triggers -- it's a no-op unless something is actually due.
+#
+# Requires two repo secrets (Settings -> Secrets and variables -> Actions):
+#   BACKEND_URL   the deployed backend's base URL, no trailing slash
+#   CRON_SECRET   must match the backend's own CRON_SECRET env var
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /alerts/cron/send-digests
+        run: |
+          curl -sf -X POST "${{ secrets.BACKEND_URL }}/alerts/cron/send-digests" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"
