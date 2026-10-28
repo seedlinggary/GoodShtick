@@ -14,6 +14,15 @@ class UserSchema(Schema):
     gender = fields.Str()
     location_country = fields.Str()
     location_city = fields.Str()
+    profile_area = fields.Str()
+    budget_min = fields.Int()
+    budget_max = fields.Int()
+    family_size = fields.Int()
+    line_of_work = fields.Str()
+    weekly_digest_enabled = fields.Bool()
+    cv_summary = fields.Str(allow_none=True)
+    cv_contact = fields.Str(allow_none=True)
+    open_to_work = fields.Bool()
 
 
 class UserPublicSchema(Schema):

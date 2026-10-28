@@ -1,3 +1,5 @@
+import json
+import os
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
@@ -10,12 +12,15 @@ from upload import upload_file
 from backend.estates.modals.estates import (
     EstatesListing, EstatesListingPhoto, EstatesListingLike,
     LISTING_TYPES, EXPIRING_LISTING_TYPES, CURRENCIES, MAX_PHOTOS, slugify,
+    SAVED_STATUSES, NOTE_MAX, LISTING_STATUSES,
 )
 from backend.estates.schemas.estates import (
     EstatesListingCardSchema, make_listing_schema,
 )
 
 estates_api = Blueprint('estates_api', __name__, url_prefix='/estates')
+
+ESTATES_SITE_URL = os.environ.get('ESTATES_SITE_URL', 'https://www.gutestates.com')
 
 PAGE_SIZE = 24
 CANDIDATE_CAP = 500
@@ -554,6 +559,91 @@ def get_listing_seo(identifier):
     return jsonify(EstatesListingCardSchema().dump(listing))
 
 
+PARSE_DRAFT_MAX_CHARS = 4000
+PARSE_DRAFT_MIN_CHARS = 20
+
+
+def _listing_draft_system_prompt():
+    return (
+        "You turn a free-text real-estate post (often copy-pasted from a WhatsApp group, "
+        "in Hebrew or English, sometimes both mixed) into a structured draft listing. "
+        "Respond ONLY with a single JSON object with exactly these keys:\n"
+        "- is_real_post: true only if the text actually describes a real listing (a property, "
+        "a rent/price, a location, something concrete to post). If the text is too short, "
+        "random, unrelated, or you're not confident it's a genuine listing, set this to false "
+        "and leave every other field null/empty -- NEVER invent a plausible-sounding listing "
+        "from text that doesn't actually describe one, even if asked for an example.\n"
+        "- listing_type: one of \"sale\", \"long_term_lease\", \"short_term_lease\" -- best guess "
+        "from context (a monthly/weekly/nightly rent implies a lease; a sale price implies \"sale\").\n"
+        "- title: a short, real-estate-listing-style title (e.g. \"4-room apartment in Ramat Beit Shemesh\"), under 150 characters.\n"
+        "- description: the rest of the post's useful detail, cleaned up into readable prose. Empty string if nothing beyond the title.\n"
+        "- price: a plain number (no currency symbol, no commas) if a price/rent is mentioned, else null.\n"
+        "- currency: \"ILS\" or \"USD\" -- guess from symbols (₪ = ILS, $ = USD) or context; default \"ILS\" if genuinely unclear.\n"
+        "- price_period: one of \"night\", \"week\", \"month\" for a lease, else null for a sale.\n"
+        "- bedrooms: a number if mentioned (Hebrew \"חדרים\" often means rooms, not strictly bedrooms -- use your best judgment), else null.\n"
+        "- bathrooms: a number if mentioned, else null.\n"
+        "- city: the city/town if mentioned, else null.\n"
+        "- neighborhood: the neighborhood/sub-area if mentioned, else null.\n"
+        "- is_agent: true if the post reads like an agent/broker wrote it, false if it reads like a private owner, null if genuinely unclear.\n"
+        "- contact_name: a name if one is given, else null.\n"
+        "- contact_phone: a phone number if one is given (as written), else null.\n"
+        "- contact_whatsapp: a WhatsApp number if explicitly distinguished from a phone number, else null.\n"
+        "- contact_email: an email if one is given, else null.\n\n"
+        "Never invent information that isn't in the text -- use null/empty for anything not actually stated. "
+        "Do not wrap the JSON in markdown fences. Return valid JSON only."
+    )
+
+
+@estates_api.route('/listings/parse-draft', methods=['POST'])
+@token_required
+def parse_listing_draft(_current_user):
+    """Stage 5's "post in 60 seconds, or forward it" -- turns a pasted
+    WhatsApp post into a pre-filled draft for ListingForm.js, which the
+    member reviews/edits before ever actually publishing (this endpoint
+    never creates a listing itself). Same gpt-4o-mini + JSON-mode pattern
+    as backend/content_pipeline/routes/ai_content.py's _generate_one."""
+    body = request.get_json(silent=True) or {}
+    text = (body.get('text') or '').strip()
+    if len(text) < PARSE_DRAFT_MIN_CHARS:
+        return jsonify({'message': 'Paste some more detail -- that\'s too short to read as a real listing.'}), 400
+    text = text[:PARSE_DRAFT_MAX_CHARS]
+
+    if not os.environ.get('OPENAI_API_KEY'):
+        return jsonify({'message': 'This feature is not configured on the server yet.'}), 500
+
+    from openai import OpenAI
+    client = OpenAI()
+    try:
+        resp = client.chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[
+                {'role': 'system', 'content': _listing_draft_system_prompt()},
+                {'role': 'user', 'content': text},
+            ],
+            response_format={'type': 'json_object'},
+            temperature=0.2,
+            max_tokens=700,
+        )
+        data = json.loads((resp.choices[0].message.content or '').strip())
+    except Exception:
+        return jsonify({'message': "Couldn't read that post -- try pasting it again, or fill in the form by hand."}), 502
+
+    # The model itself judges whether this was ever a real listing to begin
+    # with -- see the prompt's own is_real_post instruction. Refusing here
+    # (rather than returning a hallucinated draft) matters more than a
+    # confident-sounding guess: a fabricated price/location/contact could
+    # otherwise go live as a real post.
+    if not data.get('is_real_post'):
+        return jsonify({'message': "That doesn't read like a real listing -- try pasting more detail, or fill in the form by hand."}), 422
+
+    if data.get('listing_type') not in LISTING_TYPES:
+        data['listing_type'] = 'long_term_lease'
+    if data.get('currency') not in CURRENCIES:
+        data['currency'] = 'ILS'
+    data.pop('is_real_post', None)
+    return jsonify(data)
+
+
 @estates_api.route('/listings', methods=['POST'])
 @token_required
 def create_listing(current_user):
@@ -650,6 +740,44 @@ def renew_listing(current_user, listing_id):
     return jsonify(make_listing_schema(current_user).dump(listing))
 
 
+@estates_api.route('/listings/<int:listing_id>/status', methods=['PATCH'])
+@token_required
+def set_listing_status(current_user, listing_id):
+    """Stage 5's poster dashboard "mark rented/sold" -- a status change away
+    from 'active' also sets expires_at to now, reusing the exact same
+    is_expired-based exclusion every public query already applies instead
+    of threading a second, separate "is this live" check through every one
+    of them (see EstatesListing.status's own docstring)."""
+    listing = db.session.get(EstatesListing, listing_id)
+    if not listing:
+        return jsonify({'message': 'Listing not found'}), 404
+    if not _can_manage(listing, current_user):
+        return jsonify({'message': 'Not authorized'}), 403
+    body = request.get_json(silent=True) or {}
+    status = body.get('status')
+    if status not in LISTING_STATUSES:
+        return jsonify({'message': f'status must be one of: {", ".join(LISTING_STATUSES)}'}), 400
+    listing.status = status
+    if status != 'active':
+        listing.expires_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(make_listing_schema(current_user).dump(listing))
+
+
+@estates_api.route('/listings/<int:listing_id>/contact-tap', methods=['POST'])
+def track_contact_tap(listing_id):
+    """Stage 5's poster dashboard "WhatsApp taps" -- fired client-side the
+    moment a visitor clicks any contact button on the listing, logged-in or
+    not (same no-auth-required reasoning as an ad impression). listing_id
+    not existing is a silent no-op, not an error -- this is a fire-and-forget
+    beacon, never something the caller should need to handle failure for."""
+    listing = db.session.get(EstatesListing, listing_id)
+    if listing:
+        listing.contact_taps = (listing.contact_taps or 0) + 1
+        db.session.commit()
+    return jsonify({'ok': True})
+
+
 @estates_api.route('/listings/<int:listing_id>/like', methods=['POST'])
 @token_required
 def like_listing(current_user, listing_id):
@@ -660,7 +788,13 @@ def like_listing(current_user, listing_id):
         return jsonify({'message': 'You cannot save your own listing'}), 403
     existing = EstatesListingLike.query.filter_by(listing_id=listing_id, user_id=current_user.public_id).first()
     if not existing:
-        db.session.add(EstatesListingLike(listing_id=listing_id, user_id=current_user.public_id))
+        like = EstatesListingLike(listing_id=listing_id, user_id=current_user.public_id)
+        # Snapshot "as of saving" so Stage 4's price-drop/back-on-market sweep
+        # (check_saved_listings_for_changes) has a real baseline to compare
+        # against instead of notifying about a "drop" that predates the save.
+        like.notified_price = listing.price
+        like.was_active = listing.expires_at is None or listing.expires_at > datetime.utcnow()
+        db.session.add(like)
         db.session.commit()
     return jsonify({'liked': True})
 
@@ -673,6 +807,27 @@ def unlike_listing(current_user, listing_id):
         db.session.delete(like)
         db.session.commit()
     return jsonify({'liked': False})
+
+
+@estates_api.route('/listings/<int:listing_id>/like', methods=['PATCH'])
+@token_required
+def update_liked_listing(current_user, listing_id):
+    """Stage 4's "saved items with status" -- a member's own tracking note
+    and status (saved/contacted/viewed/applied) on something they've
+    already saved. Requires the like to already exist; use POST to save it
+    first."""
+    like = EstatesListingLike.query.filter_by(listing_id=listing_id, user_id=current_user.public_id).first()
+    if not like:
+        return jsonify({'message': 'You have not saved this listing'}), 404
+    body = request.get_json(silent=True) or {}
+    if 'status' in body:
+        if body['status'] not in SAVED_STATUSES:
+            return jsonify({'message': f'status must be one of: {", ".join(SAVED_STATUSES)}'}), 400
+        like.status = body['status']
+    if 'note' in body:
+        like.note = (body['note'] or '').strip()[:NOTE_MAX] or None
+    db.session.commit()
+    return jsonify({'status': like.status, 'note': like.note})
 
 
 @estates_api.route('/my/listings', methods=['GET'])
@@ -694,7 +849,126 @@ def my_liked_listings(current_user):
             .join(EstatesListingLike, EstatesListingLike.listing_id == EstatesListing.id)
             .filter(EstatesListingLike.user_id == current_user.public_id)
             .order_by(EstatesListingLike.created_at.desc()).all())
-    return jsonify({'listings': make_listing_schema(current_user, many=True).dump(rows)})
+    likes_by_listing = {
+        l.listing_id: l for l in EstatesListingLike.query.filter_by(user_id=current_user.public_id).all()
+    }
+    dumped = make_listing_schema(current_user, many=True).dump(rows)
+    for d in dumped:
+        like = likes_by_listing.get(d['id'])
+        d['saved_status'] = like.status if like else 'saved'
+        d['saved_note'] = like.note if like else None
+    return jsonify({'listings': dumped})
+
+
+def check_saved_listings_for_changes():
+    """Stage 4: notifies a member once when a listing they've saved drops in
+    price or comes back on the market after having expired. Each
+    EstatesListingLike row's own notified_price/was_active snapshot means
+    this only fires once per actual change no matter how often it's called
+    -- same watermark idea as Alert.last_notified_at. Called from
+    backend/alerts/routes/alert.py's _maybe_run_scheduled_digest() alongside
+    the instant-cadence alert check, on every cron ping/opportunistic
+    sweep -- never raises, never blocks whatever triggered it."""
+    now = datetime.utcnow()
+    rows = (db.session.query(EstatesListingLike, EstatesListing)
+            .join(EstatesListing, EstatesListingLike.listing_id == EstatesListing.id)
+            .all())
+    from backend.notifications.helpers import notify
+
+    notified = 0
+    for like, listing in rows:
+        is_active = listing.expires_at is None or listing.expires_at > now
+        listing_url = f'{ESTATES_SITE_URL}/listings/{listing.slug}'
+
+        if (like.notified_price is not None and listing.price is not None
+                and listing.price < like.notified_price):
+            symbol = '₪' if listing.currency == 'ILS' else '$'
+            notify(
+                like.user_id,
+                f'Price dropped on {listing.title}: now {symbol}{round(listing.price):,} '
+                f'(was {symbol}{round(like.notified_price):,})',
+                type='price_drop',
+                link=listing_url,
+            )
+            notified += 1
+        if listing.price is not None:
+            like.notified_price = listing.price
+
+        if is_active and not like.was_active:
+            notify(like.user_id, f'Back on the market: {listing.title}', type='back_on_market', link=listing_url)
+            notified += 1
+        like.was_active = is_active
+
+    db.session.commit()
+    return {'likes_checked': len(rows), 'notifications_sent': notified}
+
+
+STILL_AVAILABLE_AGE_DAYS = 14
+STILL_AVAILABLE_HIDE_AFTER_DAYS = 4
+
+
+def check_still_available():
+    """Stage 5's "Still available?" check -- OFF by default (see
+    AlertDigestSchedule.still_available_check_enabled); only ever called
+    from the explicit cron endpoint once a super admin turns it on, never
+    from the opportunistic sweep (see _maybe_run_scheduled_digest()).
+    Two passes: ask once a sale/long-term listing hits
+    STILL_AVAILABLE_AGE_DAYS old with no reminder sent yet, then hide it if
+    STILL_AVAILABLE_HIDE_AFTER_DAYS pass with still no confirmation."""
+    now = datetime.utcnow()
+    candidates = (EstatesListing.query
+                  .filter(EstatesListing.listing_type.in_(EXPIRING_LISTING_TYPES))
+                  .filter(EstatesListing.status == 'active')
+                  .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+                  .filter(EstatesListing.still_available_confirmed_at.is_(None))
+                  .all())
+
+    import secrets
+    from backend.alerts import emails
+
+    asked = 0
+    hidden = 0
+    for listing in candidates:
+        poster_email = listing.creator.email if listing.creator else None
+        if not poster_email:
+            continue  # no account to email (e.g. a historically-imported listing) -- nothing to do
+
+        if listing.still_available_reminder_sent_at is None:
+            age_days = (now - (listing.source_posted_at or listing.pub_date)).days
+            if age_days < STILL_AVAILABLE_AGE_DAYS:
+                continue
+            if not listing.still_available_token:
+                listing.still_available_token = secrets.token_urlsafe(32)
+            try:
+                emails.send_still_available_email(
+                    poster_email, listing.title,
+                    f'{ESTATES_SITE_URL}/still-available/confirm/{listing.still_available_token}',
+                    'Gut Estates',
+                )
+            except Exception:
+                continue
+            listing.still_available_reminder_sent_at = now
+            asked += 1
+        else:
+            wait_days = (now - listing.still_available_reminder_sent_at).days
+            if wait_days < STILL_AVAILABLE_HIDE_AFTER_DAYS:
+                continue
+            listing.expires_at = now
+            hidden += 1
+
+    db.session.commit()
+    return {'candidates': len(candidates), 'reminders_sent': asked, 'hidden': hidden}
+
+
+@estates_api.route('/still-available/confirm/<token>', methods=['GET'])
+def confirm_still_available(token):
+    listing = EstatesListing.query.filter_by(still_available_token=token).first()
+    if not listing:
+        return jsonify({'message': 'This link is invalid or has already been used.'}), 404
+    listing.still_available_confirmed_at = datetime.utcnow()
+    listing.still_available_reminder_sent_at = None
+    db.session.commit()
+    return jsonify({'message': 'Confirmed -- thanks!', 'title': listing.title})
 
 
 @estates_api.route('/sitemap-data', methods=['GET'])

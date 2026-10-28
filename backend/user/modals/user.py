@@ -1,5 +1,14 @@
+import secrets
+
 from config import db
 from datetime import datetime
+
+# Stage 4's "Profile and personal feed" -- enforced at the Python/route
+# level, not a DB enum, same convention as SEARCH_TYPES elsewhere.
+LINE_OF_WORK_OPTIONS = (
+    'tech', 'healthcare', 'education', 'sales_marketing', 'finance_accounting',
+    'skilled_trade', 'hospitality', 'legal', 'government', 'self_employed', 'student', 'other',
+)
 
 
 class User(db.Model):
@@ -22,6 +31,32 @@ class User(db.Model):
     location_country = db.Column(db.String(100), nullable=True)
     location_city = db.Column(db.String(100), nullable=True)
 
+    # Stage 4's "one profile, one personal feed" -- also optional, drives
+    # /feed/aggregate's personalization (see backend/feed/routes/aggregate.py)
+    # rather than gating anything. profile_area is free text (a city or
+    # neighborhood name, matched the same loose way search filters already do).
+    profile_area = db.Column(db.String(100), nullable=True)
+    budget_min = db.Column(db.Integer, nullable=True)
+    budget_max = db.Column(db.Integer, nullable=True)
+    family_size = db.Column(db.Integer, nullable=True)
+    line_of_work = db.Column(db.String(30), nullable=True)
+
+    # Stage 4's "Your week" digest -- opt-out token so the one-click
+    # unsubscribe link in that email needs no login (same pattern as
+    # Alert.unsubscribe_token). Defaults to on for every existing user.
+    weekly_digest_enabled = db.Column(db.Boolean, nullable=False, default=True, server_default='true')
+    weekly_digest_token = db.Column(db.String(64), nullable=True, unique=True)
+    last_weekly_digest_at = db.Column(db.DateTime, nullable=True)
+
+    # Stage 5's "Job profile and one-tap apply" -- all optional. cv_contact
+    # is deliberately separate from the account's own email: a member opts
+    # in to the public "open to work" browse (GET /tachlis/talent) only once
+    # they've set BOTH open_to_work and a contact they're fine with
+    # employers seeing, rather than this ever exposing their login email.
+    cv_summary = db.Column(db.Text, nullable=True)
+    cv_contact = db.Column(db.String(300), nullable=True)
+    open_to_work = db.Column(db.Boolean, nullable=False, default=False, server_default='false')
+
     def __init__(self, public_id, first_name, last_name, password, email, profile_name):
         self.public_id = public_id
         self.first_name = first_name
@@ -29,6 +64,7 @@ class User(db.Model):
         self.password = password
         self.email = email
         self.profile_name = profile_name
+        self.weekly_digest_token = secrets.token_urlsafe(32)
 
     @property
     def is_boss(self):

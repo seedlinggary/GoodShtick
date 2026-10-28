@@ -86,3 +86,92 @@ def send_digest_email(email, sections):
         'subject': f'{total} new match{"es" if total != 1 else ""} on GUT',
         'html': html,
     })
+
+
+def send_weekly_digest_email(email, nearby_items, price_move_items, unsubscribe_url):
+    """Stage 4's "Your week" digest -- `nearby_items`: [{title, subtitle,
+    url}], `price_move_items`: [{message, url}] (straight from Notification
+    rows). Either list can be empty; the email still sends if at least one
+    of the two has something, since "nothing new" isn't worth an email."""
+    resend, from_header = _client()
+
+    def _item_li(item):
+        subtitle_html = f' &mdash; {escape(item["subtitle"])}' if item.get('subtitle') else ''
+        return (
+            f'<li style="margin-bottom:6px;">'
+            f'<a href="{escape(item["url"])}" style="color:{ACCENT};">{escape(item["title"])}</a>{subtitle_html}'
+            f'</li>'
+        )
+
+    def _move_li(item):
+        return (
+            f'<li style="margin-bottom:6px;">'
+            f'<a href="{escape(item["url"])}" style="color:{ACCENT};">{escape(item["message"])}</a>'
+            f'</li>'
+        )
+
+    parts = ['<p>Your week on GUT:</p>']
+    if nearby_items:
+        parts.append(
+            '<div style="margin:16px 0;padding:16px;background:#f2f5f2;border-radius:10px;">'
+            '<p style="margin:0 0 8px;font-weight:700;">New near you</p>'
+            f'<ul style="margin:0;padding-left:20px;">{"".join(_item_li(i) for i in nearby_items)}</ul>'
+            '</div>'
+        )
+    if price_move_items:
+        parts.append(
+            '<div style="margin:16px 0;padding:16px;background:#f2f5f2;border-radius:10px;">'
+            '<p style="margin:0 0 8px;font-weight:700;">Price moves on things you saved</p>'
+            f'<ul style="margin:0;padding-left:20px;">{"".join(_move_li(i) for i in price_move_items)}</ul>'
+            '</div>'
+        )
+    parts.append(
+        f'<p style="margin-top:20px;"><a href="{unsubscribe_url}" style="color:#96a39c;font-size:12px;">'
+        f'Stop getting this weekly email</a></p>'
+    )
+    html = _wrap(''.join(parts))
+
+    resend.Emails.send({
+        'from': from_header, 'to': [email],
+        'subject': 'Your week on GUT',
+        'html': html,
+    })
+
+
+def send_still_available_email(poster_email, item_title, confirm_url, site_name):
+    """Stage 5's "Still available?" check -- one click confirms; no click
+    at all is a valid, silent answer too (the item just gets hidden after
+    the grace period, see check_still_available() in routes/estates.py /
+    routes/tachlis_post.py)."""
+    resend, from_header = _client()
+    html = _wrap(
+        f'<p>Is <strong>{escape(item_title)}</strong> still available on {escape(site_name)}?</p>'
+        f'<p>{_button(confirm_url, "Yes, still available")}</p>'
+        f'<p style="color:#5b6b63;font-size:13px;">If we don\'t hear back in a few days, it\'ll be hidden from search '
+        f'so people aren\'t contacting you about something that\'s gone. You can always re-list it.</p>'
+    )
+    resend.Emails.send({
+        'from': from_header, 'to': [poster_email],
+        'subject': f'Still available? {item_title}',
+        'html': html,
+    })
+
+
+def send_job_application_email(employer_email, job_title, applicant_name, applicant_email, cv_summary, note):
+    """Stage 5's "one-tap apply" -- reply_to is the applicant's own email
+    (same convention as backend/contact/routes/contact.py), so the employer
+    can just hit reply."""
+    resend, from_header = _client()
+    parts = [f'<p><strong>{escape(applicant_name)}</strong> applied to <strong>{escape(job_title)}</strong> via GUT Money\'s Job Board.</p>']
+    if note:
+        parts.append(f'<p>{escape(note)}</p>')
+    if cv_summary:
+        parts.append(f'<div style="margin-top:12px;padding:12px;background:#f2f5f2;border-radius:8px;white-space:pre-wrap;">{escape(cv_summary)}</div>')
+    parts.append(f'<p style="margin-top:16px;color:#5b6b63;font-size:13px;">Reply to this email to reach {escape(applicant_name)} directly.</p>')
+    html = _wrap(''.join(parts))
+
+    resend.Emails.send({
+        'from': from_header, 'to': [employer_email], 'reply_to': applicant_email,
+        'subject': f'Application: {job_title}',
+        'html': html,
+    })

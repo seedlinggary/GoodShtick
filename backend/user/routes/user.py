@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
-from backend.user.modals.user import User
+from backend.user.modals.user import User, LINE_OF_WORK_OPTIONS
 from backend.user.schemas.user import users_schema, user_schema
 from backend.shtick.modals.shtick import Shtick
 from backend.hock.modals.hock_post import HockPost
@@ -19,6 +19,27 @@ REGULAR_THRESHOLD_DAYS = 5
 user_api = Blueprint('user_api', __name__, url_prefix='/user')
 
 VALID_GENDERS = {'male', 'female', 'other'}
+
+
+def _as_optional_int(raw):
+    if raw in (None, ''):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+@user_api.route('/weekly-digest/unsubscribe/<token>', methods=['GET'])
+def unsubscribe_weekly_digest(token):
+    """One-click opt-out for Stage 4's "Your week" digest -- no login
+    required, same pattern as Alert.unsubscribe_token."""
+    user = User.query.filter_by(weekly_digest_token=token).first()
+    if not user:
+        return jsonify({'message': 'This link is invalid.'}), 404
+    user.weekly_digest_enabled = False
+    db.session.commit()
+    return jsonify({'message': 'Unsubscribed from the weekly digest'})
 
 
 @user_api.route('/new_email', methods=['POST'])
@@ -125,6 +146,33 @@ def update_profile(current_user):
         current_user.location_country = body['location_country'] or None
     if 'location_city' in body:
         current_user.location_city = body['location_city'] or None
+
+    # Stage 4's "one profile, one personal feed" -- all optional, drives
+    # /feed/aggregate's personalization only, nothing is gated on these.
+    if 'profile_area' in body:
+        current_user.profile_area = (body['profile_area'] or '').strip()[:100] or None
+    if 'budget_min' in body:
+        current_user.budget_min = _as_optional_int(body['budget_min'])
+    if 'budget_max' in body:
+        current_user.budget_max = _as_optional_int(body['budget_max'])
+    if 'family_size' in body:
+        current_user.family_size = _as_optional_int(body['family_size'])
+    if 'line_of_work' in body:
+        work = (body['line_of_work'] or '').strip() or None
+        if work and work not in LINE_OF_WORK_OPTIONS:
+            return jsonify({'message': f'line_of_work must be one of: {", ".join(LINE_OF_WORK_OPTIONS)}'}), 400
+        current_user.line_of_work = work
+    if 'weekly_digest_enabled' in body:
+        current_user.weekly_digest_enabled = bool(body['weekly_digest_enabled'])
+
+    # Stage 5's "Job profile and one-tap apply" -- cv_contact is what the
+    # member chooses to show employers, separate from their account email.
+    if 'cv_summary' in body:
+        current_user.cv_summary = (body['cv_summary'] or '').strip()[:4000] or None
+    if 'cv_contact' in body:
+        current_user.cv_contact = (body['cv_contact'] or '').strip()[:300] or None
+    if 'open_to_work' in body:
+        current_user.open_to_work = bool(body['open_to_work'])
 
     db.session.commit()
     return jsonify(user_schema.dump(current_user))

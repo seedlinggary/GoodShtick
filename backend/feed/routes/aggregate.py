@@ -41,7 +41,7 @@ TACHLIS_TYPE_LABEL = {'job': 'Job', 'resume': 'Resume', 'service': 'Service'}
 LISTING_TYPE_LABEL = {'sale': 'For Sale', 'long_term_lease': 'For Rent', 'short_term_lease': 'Short-Term Rental'}
 
 
-def _fetch_tachlis(q, cap):
+def _fetch_tachlis(q, cap, profile=None):
     now = datetime.utcnow()
     query = (TachlisPost.query
              .filter(TachlisPost.approved_to_publish.is_(True))
@@ -62,11 +62,12 @@ def _fetch_tachlis(q, cap):
             'url_path': f'/tachlis/post/{p.id}', 'title': p.title,
             'subtitle': ' · '.join(bits), 'image': None,
             'pub_date': p.pub_date.isoformat() if p.pub_date else None,
+            '_match': _profile_matches_tachlis(p, profile),
         })
     return items
 
 
-def _fetch_estates_listings(q, cap):
+def _fetch_estates_listings(q, cap, profile=None):
     now = datetime.utcnow()
     query = (EstatesListing.query.options(selectinload(EstatesListing.photos))
              .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)))
@@ -89,11 +90,12 @@ def _fetch_estates_listings(q, cap):
             'url_path': f'/listings/{l.slug}', 'title': l.title,
             'subtitle': ' · '.join(bits), 'image': image,
             'pub_date': l.pub_date.isoformat() if l.pub_date else None,
+            '_match': _profile_matches_estates(l, profile),
         })
     return items
 
 
-def _fetch_business_new(q, cap):
+def _fetch_business_new(q, cap, profile=None):
     query = Business.query
     if q:
         like = f'%{q}%'
@@ -108,11 +110,16 @@ def _fetch_business_new(q, cap):
             'subtitle': (b.category or '').replace('_', ' ').title(),
             'image': get_public_url(b.logo) if b.logo else None,
             'pub_date': b.pub_date.isoformat() if b.pub_date else None,
+            # No personalization signal for this source yet -- city lives on
+            # a separate BusinessLocation row this query doesn't eager-load,
+            # and N+1-loading it per row isn't worth it for a "nice to have"
+            # sort bias. Estates/Tachlis carry the real personalization.
+            '_match': False,
         })
     return items
 
 
-def _fetch_business_deals(q, cap):
+def _fetch_business_deals(q, cap, profile=None):
     now = datetime.utcnow()
     query = (BusinessPost.query.options(selectinload(BusinessPost.business))
              .filter(BusinessPost.approved_to_publish.is_(True))
@@ -134,11 +141,12 @@ def _fetch_business_deals(q, cap):
             'title': p.title, 'subtitle': ' · '.join(bits),
             'image': get_public_url(p.image) if p.image else None,
             'pub_date': p.pub_date.isoformat() if p.pub_date else None,
+            '_match': False,  # no personalization signal for this source yet
         })
     return items
 
 
-def _fetch_torah_posts(q, cap):
+def _fetch_torah_posts(q, cap, profile=None):
     query = TorahPost.query.options(selectinload(TorahPost.photos))
     if q:
         like = f'%{q}%'
@@ -153,8 +161,44 @@ def _fetch_torah_posts(q, cap):
             'url_path': f'/posts/{p.slug}', 'title': p.title,
             'subtitle': (p.category or '').title(), 'image': image,
             'pub_date': p.pub_date.isoformat() if p.pub_date else None,
+            '_match': False,  # no personalization signal for this source yet
         })
     return items
+
+
+def _profile_matches_estates(listing, profile):
+    """Stage 4's personalized feed: does this listing fit the viewer's own
+    profile? Used only to bias sort order within the recency-capped rows
+    already fetched -- never a hard filter, so an unusual profile still
+    shows *something* instead of an empty feed."""
+    if not profile:
+        return False
+    area = profile.get('area')
+    if area:
+        place = ' '.join(b for b in (listing.city, listing.neighborhood) if b).lower()
+        if area.lower() not in place:
+            return False
+    if listing.price is not None:
+        if profile.get('budget_min') is not None and listing.price < profile['budget_min']:
+            return False
+        if profile.get('budget_max') is not None and listing.price > profile['budget_max']:
+            return False
+    return bool(area or profile.get('budget_min') or profile.get('budget_max'))
+
+
+def _profile_matches_tachlis(post, profile):
+    if not profile:
+        return False
+    area = profile.get('area')
+    if area and (not post.location or area.lower() not in post.location.lower()):
+        return False
+    work = profile.get('line_of_work')
+    if work:
+        needle = work.replace('_', ' ').lower()
+        haystack = f'{post.category or ""} {post.title or ""}'.lower()
+        if needle not in haystack:
+            return False
+    return bool(area or work)
 
 
 SOURCE_FETCHERS = {
@@ -185,9 +229,24 @@ def _round_robin_merge(per_source_items):
     return merged
 
 
+def _profile_from_user(user):
+    """Stage 4's "one profile, one personal feed" -- None when the viewer
+    has no profile fields set at all, so an unpersonalized viewer gets
+    exactly the old, unbiased round-robin (no '_match' ever true)."""
+    if not user:
+        return None
+    profile = {
+        'area': user.profile_area or None,
+        'budget_min': user.budget_min,
+        'budget_max': user.budget_max,
+        'line_of_work': user.line_of_work or None,
+    }
+    return profile if any(profile.values()) else None
+
+
 @feed_api.route('/aggregate', methods=['GET'])
 @token_optional
-def aggregate(_current_user):
+def aggregate(current_user):
     requested = (request.args.get('sources') or '').strip()
     sources = [s for s in requested.split(',') if s] if requested else list(ALL_SOURCES)
     unknown = [s for s in sources if s not in SOURCE_FETCHERS]
@@ -200,19 +259,28 @@ def aggregate(_current_user):
     except (TypeError, ValueError):
         page = 1
 
+    personalized = request.args.get('personalized') == '1'
+    profile = _profile_from_user(current_user) if personalized else None
+
     # Each active source is asked for enough rows to cover every page up to
     # the one requested (already sorted + filtered in SQL), capped so a
     # very deep page number can't force an unbounded per-source query.
     cap = min(page * PAGE_SIZE, SOURCE_CANDIDATE_CAP)
-    per_source_items = [SOURCE_FETCHERS[source](q, cap) for source in sources]
+    per_source_items = [SOURCE_FETCHERS[source](q, cap, profile) for source in sources]
     merged = _round_robin_merge(per_source_items)
+    if profile:
+        # Stable sort -- profile-matching items float to the top in whatever
+        # order round-robin already gave them, everything else keeps its
+        # original relative order right behind. Never a hard filter: with
+        # no matches at all, this is a no-op and the old mix still shows.
+        merged.sort(key=lambda item: not item['_match'])
 
     start = (page - 1) * PAGE_SIZE
     page_slice = merged[start:start + PAGE_SIZE + 1]
     has_more = len(page_slice) > PAGE_SIZE
-    items = page_slice[:PAGE_SIZE]
+    items = [{k: v for k, v in item.items() if k != '_match'} for item in page_slice[:PAGE_SIZE]]
 
-    return jsonify({'items': items, 'page': page, 'has_more': has_more})
+    return jsonify({'items': items, 'page': page, 'has_more': has_more, 'personalized': bool(profile)})
 
 
 TODAY_WINDOW_HOURS = 24

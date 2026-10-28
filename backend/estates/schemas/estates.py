@@ -96,6 +96,8 @@ class EstatesListingSchema(Schema):
     pub_date = fields.DateTime()
     renewed_count = fields.Int()
     views_count = fields.Int()
+    contact_taps = fields.Int()
+    status = fields.Str()
 
     created_by = fields.Str(allow_none=True)
     is_own_listing = fields.Method('get_is_own_listing')

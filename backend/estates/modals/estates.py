@@ -17,6 +17,13 @@ LISTING_LIFETIME_DAYS = 30
 CURRENCIES = ('USD', 'ILS')
 MAX_PHOTOS = 5
 
+# Stage 5's poster dashboard -- a manual status independent of expires_at;
+# a 'rented'/'sold' listing disappears from results the same way an
+# expired one does (see routes/estates.py's list_listings), it just also
+# tells the poster (and this model) WHY it's gone, same reasoning as
+# TachlisPost.status/POST_STATUSES.
+LISTING_STATUSES = ('active', 'rented', 'sold')
+
 
 def slugify(name):
     normalized = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
@@ -98,6 +105,20 @@ class EstatesListing(db.Model):
     expires_at = db.Column(db.DateTime, nullable=True, index=True)
     renewed_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
     views_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    # Stage 5's poster dashboard -- "WhatsApp taps" (contact_whatsapp or
+    # contact_phone's wa.me link clicked), tracked client-side via POST
+    # /estates/listings/<id>/contact-tap, fired once per click, not tied to
+    # which contact method was actually used.
+    contact_taps = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    status = db.Column(db.String(20), nullable=False, default='active', server_default='active')
+
+    # Stage 5's "Still available?" check -- set when the poster confirms;
+    # cleared back to NULL on renew() so a renewed listing is asked again
+    # at its own next 14-day mark rather than being "confirmed forever"
+    # from one reply months ago.
+    still_available_confirmed_at = db.Column(db.DateTime, nullable=True)
+    still_available_reminder_sent_at = db.Column(db.DateTime, nullable=True)
+    still_available_token = db.Column(db.String(64), nullable=True, unique=True)
 
     photos = db.relationship('EstatesListingPhoto', backref='listing', lazy=True,
                               cascade='all, delete-orphan', order_by='EstatesListingPhoto.position')
@@ -128,6 +149,9 @@ class EstatesListing(db.Model):
         its own (see POST /estates/listings/<id>/renew)."""
         self.expires_at = datetime.utcnow() + timedelta(days=LISTING_LIFETIME_DAYS)
         self.renewed_count = (self.renewed_count or 0) + 1
+        self.status = 'active'
+        self.still_available_confirmed_at = None
+        self.still_available_reminder_sent_at = None
 
     def __repr__(self):
         return f'EstatesListing({self.id}) {self.title}'
@@ -149,14 +173,34 @@ class EstatesListingPhoto(db.Model):
         self.position = position
 
 
+# Stage 4's "saved items with status" -- enforced at the Python/route level,
+# not a DB enum, same convention as SEARCH_TYPES/POST_TYPES elsewhere.
+# 'saved' is the initial state the moment something's liked/hearted; the
+# other three are the member's own tracking of where they are with it.
+SAVED_STATUSES = ('saved', 'contacted', 'viewed', 'applied')
+NOTE_MAX = 500
+
+
 class EstatesListingLike(db.Model):
-    """A saved/favorited listing -- the 'come back to this later' feature."""
+    """A saved/favorited listing -- the 'come back to this later' feature.
+    Also Stage 4's shortlist: status + note let a member track where they
+    are with it, and notified_price/was_active are snapshots this same row
+    compares against on each price-drop/back-on-market sweep (see
+    backend/estates/routes/estates.py's check_saved_listings_for_changes())
+    so a listing only triggers one notification per actual change, not one
+    per sweep."""
     __tablename__ = 'estates_listing_like'
 
     id = db.Column(db.Integer, primary_key=True)
     listing_id = db.Column(db.Integer, db.ForeignKey('estates_listing.id'), nullable=False, index=True)
     user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    status = db.Column(db.String(20), nullable=False, default='saved', server_default='saved')
+    note = db.Column(db.String(NOTE_MAX), nullable=True)
+
+    notified_price = db.Column(db.Float, nullable=True)
+    was_active = db.Column(db.Boolean, nullable=False, default=True, server_default='true')
 
     __table_args__ = (
         db.UniqueConstraint('listing_id', 'user_id', name='uq_estates_like_listing_user'),

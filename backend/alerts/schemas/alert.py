@@ -11,6 +11,8 @@ class AlertSchema(Schema):
     label = fields.Str(allow_none=True)
     confirmed = fields.Bool()
     paused = fields.Bool()
+    cadence = fields.Str()
+    channel = fields.Str()
     created_at = fields.DateTime()
     last_notified_at = fields.DateTime(allow_none=True)
 

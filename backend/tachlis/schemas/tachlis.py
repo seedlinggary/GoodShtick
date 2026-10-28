@@ -22,6 +22,11 @@ class TachlisPostSchema(Schema):
     approved_to_publish = fields.Bool(allow_none=True)
     approved_by = fields.Str(allow_none=True)
     is_own_post = fields.Method('get_is_own_post')
+    views_count = fields.Int()
+    contact_taps = fields.Int()
+    status = fields.Str()
+    renewed_count = fields.Int()
+    is_expired = fields.Bool()
 
     def get_is_own_post(self, obj):
         uid = self.context.get('user_id')

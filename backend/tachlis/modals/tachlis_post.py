@@ -1,9 +1,19 @@
 from config import db
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Enforced at the Python/route level (not a Postgres enum) to match this
 # project's convention of avoiding DB-level enums elsewhere.
 POST_TYPES = ('job', 'resume')
+
+# Stage 5's poster dashboard -- 'filled' is the job-board equivalent of
+# Estates' 'rented'/'sold' (EstatesListing has no such column either; see
+# its own POST_STATUSES below). A manually-marked status is independent of
+# expires_at -- a 'filled' post still disappears from results the same way
+# an expired one does (see routes/tachlis_post.py's list_posts), it just
+# also tells the poster (and this model) WHY it's gone.
+POST_STATUSES = ('active', 'filled')
+
+EXPIRES_DAYS = {'job': 60, 'resume': 90}
 
 
 class TachlisPost(db.Model):
@@ -36,6 +46,24 @@ class TachlisPost(db.Model):
     # as EstatesListing.is_agent) rather than implying on-site.
     remote = db.Column(db.Boolean, nullable=True, index=True)
 
+    # Stage 5's poster dashboard -- same views_count idea as
+    # EstatesListing's own column (incremented on GET /tachlis/posts/<id>,
+    # never on a crawler-facing variant), plus contact_taps for "WhatsApp
+    # taps" since Tachlis has only one free-text `contact` field, not a
+    # dedicated WhatsApp column like Estates.
+    views_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    contact_taps = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    status = db.Column(db.String(20), nullable=False, default='active', server_default='active')
+    renewed_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+
+    # Stage 5's "Still available?" check -- set when the poster confirms;
+    # cleared back to NULL on renew() so a renewed post is asked again at
+    # its own next 14-day mark rather than being considered "confirmed
+    # forever" from one reply months ago.
+    still_available_confirmed_at = db.Column(db.DateTime, nullable=True)
+    still_available_reminder_sent_at = db.Column(db.DateTime, nullable=True)
+    still_available_token = db.Column(db.String(64), nullable=True, unique=True)
+
     __table_args__ = (
         # Matches the exact filter+sort pattern used by the public listing
         # query: WHERE approved_to_publish = ... ORDER BY pub_date DESC.
@@ -62,6 +90,22 @@ class TachlisPost(db.Model):
         self.category = category
         self.remote = remote
         self.source_posted_at = source_posted_at
+
+    @property
+    def is_expired(self):
+        return self.expires_at is not None and self.expires_at < datetime.utcnow()
+
+    def renew(self):
+        """Stage 5's poster dashboard "renew" button -- same shape as
+        EstatesListing.renew(): a fresh full lifetime from now, not an
+        additive bump (so a post renewed well before expiry doesn't stack
+        lifetimes), plus clearing the "still available?" confirmation so a
+        renewed post is asked again at its own next 14-day mark."""
+        self.expires_at = datetime.utcnow() + timedelta(days=EXPIRES_DAYS[self.post_type])
+        self.renewed_count += 1
+        self.status = 'active'
+        self.still_available_confirmed_at = None
+        self.still_available_reminder_sent_at = None
 
     def __repr__(self):
         return f'TachlisPost({self.id}) [{self.post_type}] {self.title}'

@@ -31,7 +31,8 @@ across the same day from sending twice.
 import os
 import random
 import re
-from datetime import datetime, time
+import secrets
+from datetime import datetime, time, timedelta
 from urllib.parse import parse_qsl
 from zoneinfo import ZoneInfo
 
@@ -40,7 +41,7 @@ from werkzeug.datastructures import MultiDict
 
 from config import db
 from security import token_required, token_optional, cron_secret_required, super_admin_required
-from backend.alerts.modals.alert import Alert, AlertDigestSchedule, SEARCH_TYPES
+from backend.alerts.modals.alert import Alert, AlertDigestSchedule, SEARCH_TYPES, CADENCES, CHANNELS
 from backend.alerts.schemas.alert import alert_schema, alerts_schema
 from backend.alerts import emails
 
@@ -204,6 +205,14 @@ def update_alert(current_user, alert_id):
     body = request.get_json(silent=True) or {}
     if 'paused' in body:
         alert.paused = bool(body['paused'])
+    if 'cadence' in body:
+        if body['cadence'] not in CADENCES:
+            return jsonify({'message': f'cadence must be one of: {", ".join(CADENCES)}'}), 400
+        alert.cadence = body['cadence']
+    if 'channel' in body:
+        if body['channel'] not in CHANNELS:
+            return jsonify({'message': f'channel must be one of: {", ".join(CHANNELS)}'}), 400
+        alert.channel = body['channel']
     db.session.commit()
     return jsonify(alert_schema.dump(alert))
 
@@ -281,13 +290,115 @@ def _get_schedule():
     return schedule
 
 
-def _run_digests():
+def _nearby_items_for_user(user, since):
+    """Stage 4's "Your week" digest, "new near you" section -- up to 5
+    Estates listings + 5 Tachlis posts from the last week, filtered to the
+    member's own profile_area when they've set one (loose substring match,
+    same as the live search filters use), otherwise just the most recent
+    from each site so even a member with no profile set gets something real."""
+    from backend.estates.modals.estates import EstatesListing
+    from backend.tachlis.modals.tachlis_post import TachlisPost
+
+    now = datetime.utcnow()
+    area = (user.profile_area or '').strip()
+
+    listing_q = (EstatesListing.query
+                 .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+                 .filter(EstatesListing.pub_date > since))
+    if area:
+        like = f'%{area}%'
+        listing_q = listing_q.filter(db.or_(EstatesListing.city.ilike(like), EstatesListing.neighborhood.ilike(like)))
+    listings = listing_q.order_by(EstatesListing.pub_date.desc()).limit(5).all()
+
+    post_q = (TachlisPost.query
+              .filter(TachlisPost.approved_to_publish.is_(True))
+              .filter(db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now))
+              .filter(TachlisPost.pub_date > since))
+    if area:
+        post_q = post_q.filter(TachlisPost.location.ilike(f'%{area}%'))
+    posts = post_q.order_by(TachlisPost.pub_date.desc()).limit(5).all()
+
+    items = []
+    for l in listings:
+        place = l.neighborhood or l.city
+        symbol = '₪' if l.currency == 'ILS' else '$'
+        price = f'{symbol}{round(l.price):,}' if l.price is not None else None
+        items.append({
+            'title': l.title, 'subtitle': ' · '.join(b for b in (place, price) if b),
+            'url': f'{_site_url("estates")}/listings/{l.slug}',
+        })
+    for p in posts:
+        items.append({
+            'title': p.title, 'subtitle': ' · '.join(b for b in (p.location, p.compensation) if b),
+            'url': f'{_site_url("tachlis")}/tachlis/post/{p.id}',
+        })
+    return items
+
+
+def _price_move_items_for_user(user, since):
+    """Stage 4's "Your week" digest, "price moves" section -- reuses the
+    Notification rows the price-drop/back-on-market sweep already created
+    (see backend/estates/routes/estates.py's check_saved_listings_for_changes),
+    rather than tracking a second, separate "what changed" signal."""
+    from backend.notifications.modals.notification import Notification
+    rows = (Notification.query
+            .filter_by(user_id=user.public_id)
+            .filter(Notification.type.in_(['price_drop', 'back_on_market']))
+            .filter(Notification.pub_date > since)
+            .order_by(Notification.pub_date.desc())
+            .limit(10).all())
+    return [{'message': n.message, 'url': n.link or MAIN_SITE_URL} for n in rows]
+
+
+def _run_weekly_digests():
+    """Stage 4's "Your week" digest -- one email per opted-in member,
+    skipped entirely if there's nothing real to say (no "nothing new this
+    week" emails). Mirrors _run_digests()'s shape: never raises per-user,
+    one bad profile shouldn't break the whole run."""
+    from backend.user.modals.user import User
+    now = datetime.utcnow()
+    since = now - timedelta(days=7)
+    users = User.query.filter_by(weekly_digest_enabled=True).all()
+
+    sent = 0
+    for user in users:
+        try:
+            nearby = _nearby_items_for_user(user, since)
+            moves = _price_move_items_for_user(user, since)
+        except Exception:
+            continue
+        if not nearby and not moves:
+            continue
+        if not user.weekly_digest_token:
+            user.weekly_digest_token = secrets.token_urlsafe(32)
+            db.session.commit()
+        try:
+            emails.send_weekly_digest_email(
+                user.email, nearby, moves,
+                f'{MAIN_SITE_URL}/user/weekly-digest/unsubscribe/{user.weekly_digest_token}',
+            )
+        except Exception:
+            continue
+        user.last_weekly_digest_at = now
+        sent += 1
+
+    db.session.commit()
+    return {'users_checked': len(users), 'emails_sent': sent}
+
+
+def _run_digests(cadence=None):
     """The actual matching/send job -- shared by the cron endpoint and the
     opportunistic sweep below. Never sends a post twice: each alert's
     last_notified_at only advances after that alert's own email went out,
-    and matching always filters to strictly newer than it."""
+    and matching always filters to strictly newer than it. `cadence`
+    ('daily'/'instant') scopes the run to just that cadence; omit it to run
+    every confirmed, unpaused alert regardless (used by the admin
+    force-run)."""
     now = datetime.utcnow()
-    alerts = Alert.query.filter_by(confirmed=True, paused=False).all()
+    query = Alert.query.filter_by(confirmed=True, paused=False)
+    if cadence is not None:
+        query = query.filter_by(cadence=cadence)
+    alerts = query.all()
 
     by_email = {}
     for alert in alerts:
@@ -322,29 +433,76 @@ def _run_digests():
     return {'alerts_checked': len(alerts), 'emails_sent': sent_emails, 'alerts_notified': sent_alerts}
 
 
-def _maybe_run_scheduled_digest():
+def _maybe_run_scheduled_digest(include_still_available=False):
     """The shared gate behind both the cron endpoint and the opportunistic
-    sweep: actually sends only once a day, at/after the super-admin-set
-    local time in Israel -- everything that pings this (an external
-    scheduler firing every few minutes, or the low-probability sweep) can
-    safely call it as often as it likes. Returns a dict either way, never
-    raises -- a bad schedule row should never break a request it's piggybacking on."""
+    sweep. 'instant'-cadence alerts are checked on EVERY call, unconditionally
+    -- that's what "within one run" means for them (see Stage 4's full alert
+    rules); their own last_notified_at watermark makes a repeat call a no-op
+    once nothing new has shown up. 'daily'-cadence alerts only actually send
+    once a day, at/after the super-admin-set local time in Israel. Returns a
+    dict either way, never raises -- a bad schedule row should never break a
+    request it's piggybacking on.
+
+    `include_still_available` defaults to False and is only ever passed
+    True by send_digests_cron() -- Stage 5's "Still available?" check never
+    runs from the random, zero-setup opportunistic sweep (maybe_send_digests),
+    only from a deliberate cron ping, and even then only once a super admin
+    has also turned it on (AlertDigestSchedule.still_available_check_enabled).
+    Two separate locks for something that messages real posters and hides
+    their content on silence."""
+    instant_result = _run_digests(cadence='instant')
+
+    try:
+        from backend.estates.routes.estates import check_saved_listings_for_changes
+        saved_items_result = check_saved_listings_for_changes()
+    except Exception:
+        saved_items_result = {'error': 'failed'}
+
     schedule = _get_schedule()
     now_local = datetime.now(ISRAEL_TZ)
     if schedule.last_run_date == now_local.date():
-        return {'skipped': 'already sent today'}
-    if now_local.time() < time(schedule.send_hour, schedule.send_minute):
-        return {'skipped': 'not due yet', 'send_at': f'{schedule.send_hour:02d}:{schedule.send_minute:02d} Israel time'}
-    result = _run_digests()
-    schedule.last_run_date = now_local.date()
-    db.session.commit()
-    return result
+        daily_result = {'skipped': 'already sent today'}
+    elif now_local.time() < time(schedule.send_hour, schedule.send_minute):
+        daily_result = {'skipped': 'not due yet', 'send_at': f'{schedule.send_hour:02d}:{schedule.send_minute:02d} Israel time'}
+    else:
+        daily_result = _run_digests(cadence='daily')
+        schedule.last_run_date = now_local.date()
+        db.session.commit()
+
+    # Python's weekday(): Monday=0..Sunday=6, matching weekly_weekday's own convention.
+    if schedule.last_weekly_run_date == now_local.date():
+        weekly_result = {'skipped': 'already sent this week'}
+    elif now_local.weekday() != schedule.weekly_weekday:
+        weekly_result = {'skipped': 'not the weekly send day'}
+    elif now_local.time() < time(schedule.send_hour, schedule.send_minute):
+        weekly_result = {'skipped': 'not due yet today'}
+    else:
+        weekly_result = _run_weekly_digests()
+        schedule.last_weekly_run_date = now_local.date()
+        db.session.commit()
+
+    still_available_result = {'skipped': 'disabled'}
+    if include_still_available and schedule.still_available_check_enabled:
+        try:
+            from backend.estates.routes.estates import check_still_available as check_estates_still_available
+            from backend.tachlis.routes.tachlis_post import check_still_available as check_tachlis_still_available
+            still_available_result = {
+                'estates': check_estates_still_available(),
+                'tachlis': check_tachlis_still_available(),
+            }
+        except Exception:
+            still_available_result = {'error': 'failed'}
+
+    return {
+        'instant': instant_result, 'daily': daily_result, 'weekly': weekly_result,
+        'saved_items': saved_items_result, 'still_available': still_available_result,
+    }
 
 
 @alerts_api.route('/cron/send-digests', methods=['POST'])
 @cron_secret_required
 def send_digests_cron():
-    return jsonify(_maybe_run_scheduled_digest())
+    return jsonify(_maybe_run_scheduled_digest(include_still_available=True))
 
 
 def maybe_send_digests():
@@ -368,8 +526,11 @@ def get_digest_schedule(_current_user):
     return jsonify({
         'send_hour': s.send_hour,
         'send_minute': s.send_minute,
+        'weekly_weekday': s.weekly_weekday,
         'timezone': 'Asia/Jerusalem',
         'last_run_date': s.last_run_date.isoformat() if s.last_run_date else None,
+        'last_weekly_run_date': s.last_weekly_run_date.isoformat() if s.last_weekly_run_date else None,
+        'still_available_check_enabled': s.still_available_check_enabled,
     })
 
 
@@ -386,9 +547,20 @@ def update_digest_schedule(_current_user):
     s = _get_schedule()
     s.send_hour = hour
     s.send_minute = minute
+    if 'weekly_weekday' in body:
+        weekday = body['weekly_weekday']
+        if not isinstance(weekday, int) or not (0 <= weekday <= 6):
+            return jsonify({'message': 'weekly_weekday must be an integer 0 (Monday) - 6 (Sunday)'}), 400
+        s.weekly_weekday = weekday
+    if 'still_available_check_enabled' in body:
+        s.still_available_check_enabled = bool(body['still_available_check_enabled'])
     s.updated_at = datetime.utcnow()
     db.session.commit()
-    return jsonify({'send_hour': s.send_hour, 'send_minute': s.send_minute, 'timezone': 'Asia/Jerusalem'})
+    return jsonify({
+        'send_hour': s.send_hour, 'send_minute': s.send_minute,
+        'weekly_weekday': s.weekly_weekday, 'timezone': 'Asia/Jerusalem',
+        'still_available_check_enabled': s.still_available_check_enabled,
+    })
 
 
 @alerts_api.route('/admin/run-now', methods=['POST'])
@@ -396,9 +568,40 @@ def update_digest_schedule(_current_user):
 def run_digests_now(_current_user):
     """Manual override for testing/verification -- bypasses the schedule
     gate entirely (but still updates last_run_date, so the regularly
-    scheduled run today becomes a no-op instead of double-sending)."""
+    scheduled run today becomes a no-op instead of double-sending). Does
+    NOT force the weekly digest too -- that one's rare/heavier (one email
+    per member) and has its own admin/run-weekly-now below for when that's
+    specifically what's being tested."""
     result = _run_digests()
     s = _get_schedule()
     s.last_run_date = datetime.now(ISRAEL_TZ).date()
     db.session.commit()
     return jsonify(result)
+
+
+@alerts_api.route('/admin/run-weekly-now', methods=['POST'])
+@super_admin_required
+def run_weekly_digests_now(_current_user):
+    """Manual override for Stage 4's "Your week" digest -- sends real email
+    to every opted-in member who has something new, right now."""
+    result = _run_weekly_digests()
+    s = _get_schedule()
+    s.last_weekly_run_date = datetime.now(ISRAEL_TZ).date()
+    db.session.commit()
+    return jsonify(result)
+
+
+@alerts_api.route('/admin/run-still-available-now', methods=['POST'])
+@super_admin_required
+def run_still_available_now(_current_user):
+    """Manual test-run for Stage 5's "Still available?" check -- runs
+    regardless of still_available_check_enabled (that flag only gates the
+    automatic cron path), so a super admin can verify it before ever
+    turning the automatic version on. Sends real email to real posters
+    whose listings/posts are actually old enough."""
+    from backend.estates.routes.estates import check_still_available as check_estates_still_available
+    from backend.tachlis.routes.tachlis_post import check_still_available as check_tachlis_still_available
+    return jsonify({
+        'estates': check_estates_still_available(),
+        'tachlis': check_tachlis_still_available(),
+    })
