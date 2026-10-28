@@ -52,6 +52,7 @@ from backend.torah.routes.torah_sefaria import torah_sefaria_api
 from backend.torah.routes.torah_zmanim import torah_zmanim_api
 from backend.torah.routes.torah_sheets import torah_sheets_api
 from backend.feed.routes.aggregate import feed_api
+from backend.alerts.routes.alert import alerts_api, link_alerts_to_user
 from backend.news.routes.news_article import news_article_api
 from backend.news.routes.news_scraper import news_scraper_api
 
@@ -155,6 +156,7 @@ application.register_blueprint(torah_sheets_api)
 application.register_blueprint(news_article_api)
 application.register_blueprint(news_scraper_api)
 application.register_blueprint(feed_api)
+application.register_blueprint(alerts_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold
@@ -181,6 +183,7 @@ def login():
 
     user.last_login = datetime.now(timezone.utc)
     db.session.commit()
+    link_alerts_to_user(user)
 
     token = jwt.encode(
         {'public_id': user.public_id, 'exp': datetime.now(timezone.utc) + timedelta(days=7)},

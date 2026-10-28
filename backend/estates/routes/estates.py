@@ -357,50 +357,43 @@ def area_page(area_slug):
     })
 
 
-@estates_api.route('/listings', methods=['GET'])
-@token_optional
-def list_listings(current_user):
-    """Public search/map feed. Expired sale/long-term listings are excluded
-    by default (see EstatesListing.is_expired) -- pass
-    ?include_expired=1&created_by=me (via /my/listings instead, which is the
-    only caller that ever needs that) to see them."""
-    listing_type = (request.args.get('listing_type') or '').strip().lower()
-    city = (request.args.get('city') or '').strip()
-    neighborhood = (request.args.get('neighborhood') or '').strip()
-    country = (request.args.get('country') or '').strip()
-    q = (request.args.get('q') or '').strip()
-    agent_only = request.args.get('agent_only') in ('1', 'true', 'True')
-    owner_only = request.args.get('owner_only') in ('1', 'true', 'True')
-    sort = (request.args.get('sort') or 'random').strip().lower()
-    try:
-        page = max(1, int(request.args.get('page', 1)))
-    except (TypeError, ValueError):
-        page = 1
-    try:
-        min_price = float(request.args.get('min_price')) if request.args.get('min_price') not in (None, '') else None
-        max_price = float(request.args.get('max_price')) if request.args.get('max_price') not in (None, '') else None
-    except (TypeError, ValueError):
-        return jsonify({'message': 'min_price/max_price must be numbers'}), 400
-    try:
-        min_bedrooms = float(request.args.get('min_bedrooms')) if request.args.get('min_bedrooms') not in (None, '') else None
-        max_bedrooms = float(request.args.get('max_bedrooms')) if request.args.get('max_bedrooms') not in (None, '') else None
-    except (TypeError, ValueError):
-        return jsonify({'message': 'min_bedrooms/max_bedrooms must be numbers'}), 400
+class FilterError(ValueError):
+    """Raised by _apply_listing_filters on bad input -- the live route turns
+    this into its existing 400 response; the alert digest job (see
+    backend/alerts/routes/alert.py) catches it per-alert so one bad/stale
+    saved search can't break the whole run."""
 
-    near_lat = near_lng = None
-    if sort == 'distance':
-        try:
-            near_lat, near_lng = float(request.args.get('lat')), float(request.args.get('lng'))
-        except (TypeError, ValueError):
-            return jsonify({'message': 'sort=distance requires numeric lat and lng'}), 400
 
-    now = datetime.utcnow()
-    query = EstatesListing.query.options(*_feed_options()).filter(
-        db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+def _apply_listing_filters(query, args):
+    """Builds the exact same filtered query from `args` (a dict-like
+    supporting .get(), e.g. request.args or a MultiDict rebuilt from an
+    Alert's stored querystring) that /estates/listings itself uses --
+    the ONE place "what counts as a match" is defined, so a saved alert
+    and the live search can never quietly drift apart. Does not touch
+    expiry/sort/pagination -- callers add those themselves (list_listings
+    excludes expired before calling this; the digest job additionally
+    filters to newer-than-last-notified)."""
+    listing_type = (args.get('listing_type') or '').strip().lower()
+    city = (args.get('city') or '').strip()
+    neighborhood = (args.get('neighborhood') or '').strip()
+    country = (args.get('country') or '').strip()
+    q = (args.get('q') or '').strip()
+    agent_only = args.get('agent_only') in ('1', 'true', 'True')
+    owner_only = args.get('owner_only') in ('1', 'true', 'True')
+    try:
+        min_price = float(args.get('min_price')) if args.get('min_price') not in (None, '') else None
+        max_price = float(args.get('max_price')) if args.get('max_price') not in (None, '') else None
+    except (TypeError, ValueError):
+        raise FilterError('min_price/max_price must be numbers')
+    try:
+        min_bedrooms = float(args.get('min_bedrooms')) if args.get('min_bedrooms') not in (None, '') else None
+        max_bedrooms = float(args.get('max_bedrooms')) if args.get('max_bedrooms') not in (None, '') else None
+    except (TypeError, ValueError):
+        raise FilterError('min_bedrooms/max_bedrooms must be numbers')
 
     if listing_type:
         if listing_type not in LISTING_TYPES:
-            return jsonify({'message': f'listing_type must be one of: {", ".join(LISTING_TYPES)}'}), 400
+            raise FilterError(f'listing_type must be one of: {", ".join(LISTING_TYPES)}')
         query = query.filter(EstatesListing.listing_type == listing_type)
     if city:
         # Matches neighborhood too -- a search for "Givat Hamivtar" should
@@ -436,13 +429,44 @@ def list_listings(current_user):
             EstatesListing.address.ilike(like)))
 
     bbox_keys = ('north', 'south', 'east', 'west')
-    if all(request.args.get(k) not in (None, '') for k in bbox_keys):
+    if all(args.get(k) not in (None, '') for k in bbox_keys):
         try:
-            north, south, east, west = (float(request.args.get(k)) for k in bbox_keys)
+            north, south, east, west = (float(args.get(k)) for k in bbox_keys)
         except (TypeError, ValueError):
-            return jsonify({'message': 'north/south/east/west must be numbers'}), 400
+            raise FilterError('north/south/east/west must be numbers')
         query = query.filter(EstatesListing.lat.isnot(None), EstatesListing.lng.isnot(None),
                               EstatesListing.lat.between(south, north), EstatesListing.lng.between(west, east))
+
+    return query
+
+
+@estates_api.route('/listings', methods=['GET'])
+@token_optional
+def list_listings(current_user):
+    """Public search/map feed. Expired sale/long-term listings are excluded
+    by default (see EstatesListing.is_expired) -- pass
+    ?include_expired=1&created_by=me (via /my/listings instead, which is the
+    only caller that ever needs that) to see them."""
+    sort = (request.args.get('sort') or 'random').strip().lower()
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+
+    near_lat = near_lng = None
+    if sort == 'distance':
+        try:
+            near_lat, near_lng = float(request.args.get('lat')), float(request.args.get('lng'))
+        except (TypeError, ValueError):
+            return jsonify({'message': 'sort=distance requires numeric lat and lng'}), 400
+
+    now = datetime.utcnow()
+    query = EstatesListing.query.options(*_feed_options()).filter(
+        db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+    try:
+        query = _apply_listing_filters(query, request.args)
+    except FilterError as e:
+        return jsonify({'message': str(e)}), 400
 
     total = query.count()
 

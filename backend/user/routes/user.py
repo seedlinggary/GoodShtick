@@ -8,6 +8,7 @@ from backend.user.schemas.user import users_schema, user_schema
 from backend.shtick.modals.shtick import Shtick
 from backend.hock.modals.hock_post import HockPost
 from backend.analytics.modals.visitor import VisitorSession, VisitorEvent
+from backend.alerts.routes.alert import link_alerts_to_user
 from config import db
 from security import token_required
 from werkzeug.security import generate_password_hash
@@ -59,6 +60,7 @@ def add_user():
     )
     db.session.add(new_user)
     db.session.commit()
+    link_alerts_to_user(new_user)
     return jsonify(user_schema.dump(new_user)), 201
 
 

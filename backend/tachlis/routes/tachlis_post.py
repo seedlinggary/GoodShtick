@@ -8,6 +8,7 @@ from security import token_required, token_optional, admin_required, super_admin
 from backend.tachlis.modals.tachlis_post import TachlisPost, POST_TYPES
 from backend.tachlis.schemas.tachlis import make_tachlis_post_schema
 from backend.user.modals.user import User
+from backend.alerts.routes.alert import maybe_send_digests
 
 tachlis_api = Blueprint('tachlis_api', __name__, url_prefix='/tachlis')
 
@@ -183,38 +184,30 @@ def area_page(location_slug):
     })
 
 
-@tachlis_api.route('/posts', methods=['GET'])
-@token_optional
-def list_posts(current_user):
-    """Public board listing. Approved only, excludes expired.
-    ?type=job|resume|service filters; ?page=1.. paginates; ?q=search-term filters
-    by title/body/location/compensation/contact/author name or an exact id;
-    ?location=exact-value filters to one of the distinct values /tachlis/locations
-    returns; ?category=exact-value filters to one of the distinct values
-    /tachlis/categories returns; ?remote=1 filters to remote-only jobs;
-    ?has_pay=1 filters to posts with a compensation value set;
-    ?sort=newest|oldest controls order (default newest)."""
-    post_type = (request.args.get('type') or '').strip().lower()
-    q = (request.args.get('q') or '').strip()
-    location = (request.args.get('location') or '').strip()
-    category = (request.args.get('category') or '').strip()
-    remote_only = request.args.get('remote') == '1'
-    has_pay = request.args.get('has_pay') == '1'
-    sort = (request.args.get('sort') or 'newest').strip().lower()
-    try:
-        page = max(1, int(request.args.get('page', 1)))
-    except (TypeError, ValueError):
-        page = 1
+class FilterError(ValueError):
+    """Raised by _apply_post_filters on bad input -- the live route turns
+    this into its existing 400 response; the alert digest job (see
+    backend/alerts/routes/alert.py) catches it per-alert so one bad/stale
+    saved search can't break the whole run."""
 
-    now = datetime.utcnow()
-    query = (TachlisPost.query
-             .options(*_feed_options())
-             .filter(TachlisPost.approved_to_publish.is_(True))
-             .filter(db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now)))
+
+def _apply_post_filters(query, args):
+    """Builds the exact same filtered query from `args` (a dict-like
+    supporting .get(), e.g. request.args or a MultiDict rebuilt from an
+    Alert's stored querystring) that /tachlis/posts itself uses -- the ONE
+    place "what counts as a match" is defined, so a saved alert and the
+    live board can never quietly drift apart. Does not touch
+    approval/expiry/sort/pagination -- callers add those themselves."""
+    post_type = (args.get('type') or '').strip().lower()
+    q = (args.get('q') or '').strip()
+    location = (args.get('location') or '').strip()
+    category = (args.get('category') or '').strip()
+    remote_only = args.get('remote') == '1'
+    has_pay = args.get('has_pay') == '1'
 
     if post_type:
         if post_type not in POST_TYPES:
-            return jsonify({'message': f'type must be one of: {", ".join(POST_TYPES)}'}), 400
+            raise FilterError(f'type must be one of: {", ".join(POST_TYPES)}')
         query = query.filter(TachlisPost.post_type == post_type)
 
     if location:
@@ -239,6 +232,42 @@ def list_posts(current_user):
         if q.isdigit():
             filters.append(TachlisPost.id == int(q))
         query = query.join(TachlisPost.user).filter(db.or_(*filters))
+
+    return query
+
+
+@tachlis_api.route('/posts', methods=['GET'])
+@token_optional
+def list_posts(current_user):
+    """Public board listing. Approved only, excludes expired.
+    ?type=job|resume|service filters; ?page=1.. paginates; ?q=search-term filters
+    by title/body/location/compensation/contact/author name or an exact id;
+    ?location=exact-value filters to one of the distinct values /tachlis/locations
+    returns; ?category=exact-value filters to one of the distinct values
+    /tachlis/categories returns; ?remote=1 filters to remote-only jobs;
+    ?has_pay=1 filters to posts with a compensation value set;
+    ?sort=newest|oldest controls order (default newest)."""
+    # Opportunistic fallback for the alert digest job -- see
+    # backend/alerts/routes/alert.py's module docstring. Cheap (a
+    # random-number check that's a no-op almost every call) and never
+    # blocks this request.
+    maybe_send_digests()
+
+    sort = (request.args.get('sort') or 'newest').strip().lower()
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+
+    now = datetime.utcnow()
+    query = (TachlisPost.query
+             .options(*_feed_options())
+             .filter(TachlisPost.approved_to_publish.is_(True))
+             .filter(db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now)))
+    try:
+        query = _apply_post_filters(query, request.args)
+    except FilterError as e:
+        return jsonify({'message': str(e)}), 400
 
     # The time it actually went up in its source WhatsApp group when known
     # (Tab's daily imports), falling back to pub_date for on-site posts or
