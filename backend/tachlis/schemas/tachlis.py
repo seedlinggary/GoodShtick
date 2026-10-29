@@ -27,10 +27,24 @@ class TachlisPostSchema(Schema):
     status = fields.Str()
     renewed_count = fields.Int()
     is_expired = fields.Bool()
+    # Set only when a claimed business posted this via the Hiring tab (see
+    # routes/tachlis_post.py's create_post) -- business_id alone, plus the
+    # minimal name/slug a card/detail page needs to link to that business's
+    # public profile (siteUrl('business', `/business/<slug>`) on the
+    # frontend), not the full BusinessCardSchema.
+    business_id = fields.Int(allow_none=True)
+    business_name = fields.Method('get_business_name')
+    business_slug = fields.Method('get_business_slug')
 
     def get_is_own_post(self, obj):
         uid = self.context.get('user_id')
         return bool(uid) and obj.user_id == uid
+
+    def get_business_name(self, obj):
+        return obj.business.name if obj.business else None
+
+    def get_business_slug(self, obj):
+        return obj.business.slug if obj.business else None
 
 
 class TachlisPostCardSchema(Schema):
@@ -49,10 +63,19 @@ class TachlisPostCardSchema(Schema):
     pub_date = fields.DateTime()
     source_posted_at = fields.DateTime(allow_none=True)
     is_own_post = fields.Method('get_is_own_post')
+    business_id = fields.Int(allow_none=True)
+    business_name = fields.Method('get_business_name')
+    business_slug = fields.Method('get_business_slug')
 
     def get_is_own_post(self, obj):
         uid = self.context.get('user_id')
         return bool(uid) and obj.user_id == uid
+
+    def get_business_name(self, obj):
+        return obj.business.name if obj.business else None
+
+    def get_business_slug(self, obj):
+        return obj.business.slug if obj.business else None
 
 
 def make_tachlis_post_schema(current_user=None, many=False, card=False):

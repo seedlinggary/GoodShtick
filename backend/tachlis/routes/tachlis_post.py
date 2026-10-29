@@ -11,6 +11,8 @@ from security import token_required, token_optional, admin_required, super_admin
 from backend.tachlis.modals.tachlis_post import TachlisPost, POST_TYPES, POST_STATUSES, EXPIRES_DAYS
 from backend.tachlis.schemas.tachlis import make_tachlis_post_schema
 from backend.user.modals.user import User
+from backend.business.modals.business import Business
+from backend.business.routes.business_owner_tools import _can_manage
 from backend.alerts.routes.alert import maybe_send_digests
 
 tachlis_api = Blueprint('tachlis_api', __name__, url_prefix='/tachlis')
@@ -25,13 +27,39 @@ LOCATION_MAX = 120
 COMPENSATION_MAX = 120
 CATEGORY_MAX = 60
 
+# Default-fill only (see create_post's business_id path) -- the Job Board's
+# own `category` field stays free text and user-editable, this just saves a
+# claimed business owner from typing it in when their business category
+# already implies a reasonable Job Board category. Every value in
+# backend/business/modals/business.py's BUSINESS_CATEGORIES maps to
+# something, with 'Other' as the catch-all for categories that don't have a
+# real job-board equivalent (shul/kollel/mikvah/nonprofit/gemach/attraction).
+BUSINESS_CATEGORY_TO_JOB_CATEGORY = {
+    'restaurant': 'Hospitality',
+    'grocery': 'Retail',
+    'retail': 'Retail',
+    'professional_services': 'Professional',
+    'health_beauty': 'Health & Beauty',
+    'home_services': 'Skilled Trade',
+    'education': 'Education',
+    'entertainment': 'Hospitality',
+    'automotive': 'Automotive',
+    'nonprofit': 'Other',
+    'gemach': 'Other',
+    'shul': 'Other',
+    'kollel': 'Other',
+    'mikvah': 'Other',
+    'attraction': 'Other',
+    'other': 'Other',
+}
+
 
 def _feed_options():
-    return [selectinload(TachlisPost.user)]
+    return [selectinload(TachlisPost.user), selectinload(TachlisPost.business)]
 
 
 def _admin_options():
-    return [selectinload(TachlisPost.user), selectinload(TachlisPost.approver)]
+    return [selectinload(TachlisPost.user), selectinload(TachlisPost.approver), selectinload(TachlisPost.business)]
 
 
 def _validate_post_fields(body, partial=False):
@@ -305,12 +333,27 @@ def list_talent():
     """Stage 5's "open to work" card -- public browse of members who've
     opted in AND set a contact they're fine with employers seeing. Never
     exposes the account's own login email -- only what's in cv_contact,
-    which the member fills in themselves (see User.cv_contact)."""
-    rows = (User.query
-            .filter(User.open_to_work.is_(True))
-            .filter(User.cv_contact.isnot(None), User.cv_contact != '')
-            .order_by(User.last_login.desc().nullslast())
-            .limit(100).all())
+    which the member fills in themselves (see User.cv_contact).
+
+    Optional ?location=substring filters against profile_area (the one
+    free-text "where" field User has -- same field _notify_job_match_users
+    already matches a job post's own location against, loosely/case-
+    insensitively, so this reuses that exact convention rather than
+    inventing a new one). Optional ?line_of_work=exact-value filters to one
+    of User.LINE_OF_WORK_OPTIONS. Neither param changes the existing
+    unfiltered behavior when omitted."""
+    location = (request.args.get('location') or '').strip()
+    line_of_work = (request.args.get('line_of_work') or '').strip()
+
+    query = (User.query
+             .filter(User.open_to_work.is_(True))
+             .filter(User.cv_contact.isnot(None), User.cv_contact != ''))
+    if location:
+        query = query.filter(User.profile_area.ilike(f'%{location}%'))
+    if line_of_work:
+        query = query.filter(User.line_of_work == line_of_work)
+
+    rows = query.order_by(User.last_login.desc().nullslast()).limit(100).all()
     return jsonify({'talent': [{
         'public_id': u.public_id,
         'profile_name': u.profile_name,
@@ -700,6 +743,21 @@ def create_post(current_user):
     if error:
         return error, 400
 
+    # Business ↔ Job Board hiring loop -- a claimed business owner posting
+    # via the business tools "Hiring" tab sends business_id so the post can
+    # be linked back to its business (badge/link on the card, see
+    # schemas/tachlis.py) and auto-approved below. Ownership is verified
+    # server-side with the exact same _can_manage helper every other
+    # business-owner route uses (business_owner_tools.py) -- never trust
+    # the client's own claim of ownership. A business_id that doesn't check
+    # out is a clear 403, not a silent drop into the normal pending queue.
+    business = None
+    business_id = body.get('business_id')
+    if business_id is not None:
+        business = db.session.get(Business, business_id)
+        if not business or not _can_manage(business, current_user):
+            return jsonify({'message': 'Not authorized to post on behalf of that business'}), 403
+
     post = TachlisPost(
         post_type=fields['post_type'],
         title=fields['title'],
@@ -712,6 +770,7 @@ def create_post(current_user):
         remote=fields.get('remote'),
         source_posted_at=fields.get('source_posted_at'),
         expires_at=datetime.utcnow() + timedelta(days=EXPIRES_DAYS[fields['post_type']]),
+        business_id=business.id if business else None,
     )
 
     # Same bypass create_shtick already uses for admin/super_admin posters --
@@ -719,7 +778,11 @@ def create_post(current_user):
     # pending) for the moderation queue below. This is what lets an
     # automated bot account (logged in as admin/super_admin) post listings
     # that go live immediately instead of waiting on manual approval.
-    if current_user.is_boss:
+    #
+    # A verified business owner's post gets the same bypass -- claim
+    # verification (BusinessClaim/_can_manage above) is already a trust
+    # signal, so there's no added moderation value in queuing it.
+    if current_user.is_boss or business is not None:
         post.approved_to_publish = True
         post.approved_by = current_user.public_id
 

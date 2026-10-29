@@ -36,6 +36,11 @@ class User(db.Model):
     # rather than gating anything. profile_area is free text (a city or
     # neighborhood name, matched the same loose way search filters already do).
     profile_area = db.Column(db.String(100), nullable=True)
+    # Stamped only when profile_area actually changes to a new non-null
+    # value (see update_profile in backend/user/routes/user.py) -- used by
+    # the weekly digest's "did they just move" detection. Deliberately a
+    # single bare timestamp, not a full change-history/audit table.
+    profile_area_changed_at = db.Column(db.DateTime, nullable=True)
     budget_min = db.Column(db.Integer, nullable=True)
     budget_max = db.Column(db.Integer, nullable=True)
     family_size = db.Column(db.Integer, nullable=True)

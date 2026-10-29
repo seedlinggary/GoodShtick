@@ -150,7 +150,11 @@ def update_profile(current_user):
     # Stage 4's "one profile, one personal feed" -- all optional, drives
     # /feed/aggregate's personalization only, nothing is gated on these.
     if 'profile_area' in body:
-        current_user.profile_area = (body['profile_area'] or '').strip()[:100] or None
+        old_profile_area = current_user.profile_area
+        new_profile_area = (body['profile_area'] or '').strip()[:100] or None
+        current_user.profile_area = new_profile_area
+        if new_profile_area and new_profile_area != old_profile_area:
+            current_user.profile_area_changed_at = datetime.utcnow()
     if 'budget_min' in body:
         current_user.budget_min = _as_optional_int(body['budget_min'])
     if 'budget_max' in body:

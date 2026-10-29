@@ -71,6 +71,20 @@ OPPORTUNISTIC_CHANCE = 1 / 3000
 
 MAX_ITEMS_PER_ALERT = 20
 
+# Stage 4's "Your week" digest, "looks like you're exploring {city}" section
+# -- same env-var-with-real-default convention as MAIN_SITE_URL, matching
+# BUSINESS_SITE_URL's own default in backend/business/routes/business_post.py.
+BUSINESS_SITE_URL = os.environ.get('BUSINESS_SITE_URL', 'https://www.goodshtickbusiness.com')
+
+# Passive "moving to a new area" detection thresholds (see
+# _detected_move_for_user below). An explicit profile_area change is a much
+# stronger, deliberate signal than a like cluster, hence the longer window;
+# the like-cluster window/minimum are picked to need a real pattern (3+
+# distinct likes in 3 weeks) rather than one curious click.
+MOVE_DETECTION_EXPLICIT_WINDOW_DAYS = 14
+MOVE_DETECTION_CLUSTER_WINDOW_DAYS = 21
+MOVE_DETECTION_CLUSTER_MIN_LIKES = 3
+
 
 def _site_url(search_type):
     return {'estates': 'https://www.gutestates.com', 'tachlis': 'https://www.gutmoney.com'}.get(search_type, MAIN_SITE_URL)
@@ -335,6 +349,96 @@ def _nearby_items_for_user(user, since):
     return items
 
 
+def _detected_move_for_user(user, now):
+    """Stage 4's "Your week" digest, "looks like you're exploring {city}"
+    section -- passive "moving to a new area" detection, two signals:
+
+    1. Explicit: the member changed profile_area themselves (see
+       update_profile in backend/user/routes/user.py, which stamps
+       profile_area_changed_at) within the last
+       MOVE_DETECTION_EXPLICIT_WINDOW_DAYS days. A deliberate signal, so it
+       wins outright -- the clustering check below is skipped entirely
+       when this fires.
+    2. Clustering: no recent explicit change, but the member's own
+       EstatesListingLike rows from the last MOVE_DETECTION_CLUSTER_WINDOW_DAYS
+       days pile up on some OTHER city (not their current profile_area,
+       case-insensitive) at least MOVE_DETECTION_CLUSTER_MIN_LIKES times --
+       a softer "browsing listings somewhere else a lot" signal. If more
+       than one city clears the bar, the one with the most likes wins.
+
+    Either way, once a target city is found this builds the same shape of
+    content _nearby_items_for_user already builds for "new near you",
+    just scoped to that one city: top 5 Tachlis posts (newest first, same
+    as _nearby_items_for_user) + top 5 grocery/shul/mikvah businesses
+    there (highest-rated first, since these are "essentials to know
+    about" rather than "what's new"). Returns None if there's nothing
+    real to show, so _run_weekly_digests can skip this section cleanly."""
+    from backend.estates.modals.estates import EstatesListing, EstatesListingLike
+    from backend.tachlis.modals.tachlis_post import TachlisPost
+    from backend.business.modals.business import Business, BusinessLocation
+
+    current_area = (user.profile_area or '').strip()
+    target_city = None
+
+    if (user.profile_area_changed_at
+            and user.profile_area_changed_at > now - timedelta(days=MOVE_DETECTION_EXPLICIT_WINDOW_DAYS)
+            and current_area):
+        target_city = current_area
+    else:
+        since = now - timedelta(days=MOVE_DETECTION_CLUSTER_WINDOW_DAYS)
+        like_count = db.func.count(EstatesListingLike.id)
+        # Grouped by lower(city) so "Lakewood" and "lakewood" count toward
+        # the same cluster instead of each falling short of the threshold
+        # on their own; func.max(city) just picks one real-cased spelling
+        # back out to display/query with.
+        city_lower = db.func.lower(EstatesListing.city)
+        display_city = db.func.max(EstatesListing.city)
+        rows = (db.session.query(display_city, like_count)
+                .join(EstatesListingLike, EstatesListingLike.listing_id == EstatesListing.id)
+                .filter(EstatesListingLike.user_id == user.public_id)
+                .filter(EstatesListingLike.created_at > since)
+                .filter(EstatesListing.city.isnot(None))
+                .group_by(city_lower)
+                .having(like_count >= MOVE_DETECTION_CLUSTER_MIN_LIKES)
+                .order_by(like_count.desc())
+                .all())
+        for city, _count in rows:
+            if not current_area or city.lower() != current_area.lower():
+                target_city = city
+                break
+
+    if not target_city:
+        return None
+
+    job_q = (TachlisPost.query
+             .filter(TachlisPost.approved_to_publish.is_(True))
+             .filter(db.or_(TachlisPost.expires_at.is_(None), TachlisPost.expires_at > now))
+             .filter(TachlisPost.location.ilike(f'%{target_city}%')))
+    jobs = job_q.order_by(TachlisPost.pub_date.desc()).limit(5).all()
+    job_items = [{
+        'title': p.title, 'subtitle': ' · '.join(b for b in (p.location, p.compensation) if b),
+        'url': f'{_site_url("tachlis")}/tachlis/post/{p.id}',
+    } for p in jobs]
+
+    # A business's city lives on BusinessLocation, not Business itself --
+    # same join-via-subquery pattern as business.py's list_businesses city filter.
+    loc_ids = (db.session.query(BusinessLocation.business_id)
+               .filter(BusinessLocation.city.ilike(f'%{target_city}%')))
+    biz_q = (Business.query
+             .filter(Business.category.in_(('grocery', 'shul', 'mikvah')))
+             .filter(Business.id.in_(loc_ids)))
+    businesses = biz_q.order_by(Business.rating_avg.desc()).limit(5).all()
+    business_items = [{
+        'title': b.name, 'subtitle': b.category,
+        'url': f'{BUSINESS_SITE_URL}/businesses/{b.slug}',
+    } for b in businesses]
+
+    if not job_items and not business_items:
+        return None
+
+    return {'city': target_city, 'jobs': job_items, 'businesses': business_items}
+
+
 def _price_move_items_for_user(user, since):
     """Stage 4's "Your week" digest, "price moves" section -- reuses the
     Notification rows the price-drop/back-on-market sweep already created
@@ -365,9 +469,10 @@ def _run_weekly_digests():
         try:
             nearby = _nearby_items_for_user(user, since)
             moves = _price_move_items_for_user(user, since)
+            detected_move = _detected_move_for_user(user, now)
         except Exception:
             continue
-        if not nearby and not moves:
+        if not nearby and not moves and not detected_move:
             continue
         if not user.weekly_digest_token:
             user.weekly_digest_token = secrets.token_urlsafe(32)
@@ -376,6 +481,7 @@ def _run_weekly_digests():
             emails.send_weekly_digest_email(
                 user.email, nearby, moves,
                 f'{MAIN_SITE_URL}/user/weekly-digest/unsubscribe/{user.weekly_digest_token}',
+                detected_move=detected_move,
             )
         except Exception:
             continue

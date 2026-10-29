@@ -64,6 +64,13 @@ class TachlisPost(db.Model):
     still_available_reminder_sent_at = db.Column(db.DateTime, nullable=True)
     still_available_token = db.Column(db.String(64), nullable=True, unique=True)
 
+    # Optional -- most posts are personal (a member posting their own job
+    # opening or resume), not business-sourced. Set only when a claimed
+    # business owner posts a job via the business tools "Hiring" tab (see
+    # routes/tachlis_post.py's create_post), after verifying they actually
+    # manage that business -- never trust-on-input from the client.
+    business_id = db.Column(db.Integer, db.ForeignKey('business.id'), nullable=True, index=True)
+
     __table_args__ = (
         # Matches the exact filter+sort pattern used by the public listing
         # query: WHERE approved_to_publish = ... ORDER BY pub_date DESC.
@@ -75,10 +82,12 @@ class TachlisPost(db.Model):
                             backref=db.backref('tachlis_posts', lazy=True))
     approver = db.relationship('User', foreign_keys=[approved_by],
                                 backref=db.backref('approved_tachlis_posts', lazy=True))
+    business = db.relationship('Business', backref=db.backref('tachlis_posts', lazy=True))
 
     def __init__(self, post_type, title, body, contact, user_id,
                  location=None, compensation=None, expires_at=None,
-                 category=None, remote=None, source_posted_at=None):
+                 category=None, remote=None, source_posted_at=None,
+                 business_id=None):
         self.post_type = post_type
         self.title = title
         self.body = body
@@ -90,6 +99,7 @@ class TachlisPost(db.Model):
         self.category = category
         self.remote = remote
         self.source_posted_at = source_posted_at
+        self.business_id = business_id
 
     @property
     def is_expired(self):

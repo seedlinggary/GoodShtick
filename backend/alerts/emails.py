@@ -88,11 +88,17 @@ def send_digest_email(email, sections):
     })
 
 
-def send_weekly_digest_email(email, nearby_items, price_move_items, unsubscribe_url):
+def send_weekly_digest_email(email, nearby_items, price_move_items, unsubscribe_url, detected_move=None):
     """Stage 4's "Your week" digest -- `nearby_items`: [{title, subtitle,
     url}], `price_move_items`: [{message, url}] (straight from Notification
     rows). Either list can be empty; the email still sends if at least one
-    of the two has something, since "nothing new" isn't worth an email."""
+    of the two has something, since "nothing new" isn't worth an email.
+
+    `detected_move`: optional {city, jobs, businesses} from
+    backend/alerts/routes/alert.py's _detected_move_for_user -- the passive
+    "moving to a new area" section, `jobs`/`businesses` each shaped like
+    `nearby_items`. None (the default) skips the section entirely, same as
+    an empty nearby_items/price_move_items list skips those."""
     resend, from_header = _client()
 
     def _item_li(item):
@@ -123,6 +129,25 @@ def send_weekly_digest_email(email, nearby_items, price_move_items, unsubscribe_
             '<div style="margin:16px 0;padding:16px;background:#f2f5f2;border-radius:10px;">'
             '<p style="margin:0 0 8px;font-weight:700;">Price moves on things you saved</p>'
             f'<ul style="margin:0;padding-left:20px;">{"".join(_move_li(i) for i in price_move_items)}</ul>'
+            '</div>'
+        )
+    if detected_move and (detected_move.get('jobs') or detected_move.get('businesses')):
+        city = escape(detected_move['city'])
+        sub_sections = []
+        if detected_move.get('jobs'):
+            sub_sections.append(
+                '<p style="margin:12px 0 8px;font-weight:600;">Jobs there</p>'
+                f'<ul style="margin:0;padding-left:20px;">{"".join(_item_li(i) for i in detected_move["jobs"])}</ul>'
+            )
+        if detected_move.get('businesses'):
+            sub_sections.append(
+                '<p style="margin:12px 0 8px;font-weight:600;">Local essentials</p>'
+                f'<ul style="margin:0;padding-left:20px;">{"".join(_item_li(i) for i in detected_move["businesses"])}</ul>'
+            )
+        parts.append(
+            '<div style="margin:16px 0;padding:16px;background:#f2f5f2;border-radius:10px;">'
+            f'<p style="margin:0 0 8px;font-weight:700;">Looks like you might be exploring {city} &mdash; here\'s what\'s there</p>'
+            f'{"".join(sub_sections)}'
             '</div>'
         )
     parts.append(
