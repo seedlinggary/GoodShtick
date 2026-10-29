@@ -11,6 +11,7 @@ from backend.ads.modals.ad import Ad
 from backend.ads.modals.ad_impression import AdImpression
 from backend.ads.modals.ad_click import AdClick
 from backend.ads.schemas.ad import ad_schema, ads_schema, ad_serve_schema
+from backend.user.modals.audit_log import log_admin_action
 from upload import upload_file
 
 ads_api = Blueprint('ads_api', __name__, url_prefix='/ads')
@@ -296,11 +297,25 @@ def click_ad(current_user, ad_id):
 
 # ── Superadmin management ────────────────────────────────────────────────
 
+ADS_PAGE_SIZE = 50  # same pagination response shape as /admin/users and /admin/approvals
+
+
 @ads_api.route('', methods=['GET'])
 @super_admin_required
 def list_ads(_current_user):
-    ads = Ad.query.order_by(Ad.pub_date.desc()).all()
-    return jsonify(ads_schema.dump(ads))
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+
+    query = Ad.query.order_by(Ad.pub_date.desc())
+    total = query.count()
+    ads = query.offset((page - 1) * ADS_PAGE_SIZE).limit(ADS_PAGE_SIZE).all()
+    return jsonify({
+        'items': ads_schema.dump(ads),
+        'total': total, 'page': page, 'per_page': ADS_PAGE_SIZE,
+        'has_more': page * ADS_PAGE_SIZE < total,
+    })
 
 
 @ads_api.route('', methods=['POST'])
@@ -348,7 +363,7 @@ def create_ad(current_user):
 
 @ads_api.route('/<int:ad_id>', methods=['PUT'])
 @super_admin_required
-def update_ad(_current_user, ad_id):
+def update_ad(current_user, ad_id):
     ad = db.session.get(Ad, ad_id)
     if not ad:
         return jsonify({'message': 'Ad not found'}), 404
@@ -357,7 +372,11 @@ def update_ad(_current_user, ad_id):
     if 'status' in body:
         if body['status'] not in VALID_STATUSES:
             return jsonify({'message': f'Invalid status. Must be one of: {", ".join(VALID_STATUSES)}'}), 400
+        old_status = ad.status
         ad.status = body['status']
+        if old_status != ad.status:
+            log_admin_action(current_user, 'ad_status_change', 'ad', ad.id,
+                              f'"{ad.name}": {old_status} → {ad.status}')
     if 'destination_type' in body:
         if body['destination_type'] not in VALID_DESTINATION_TYPES:
             return jsonify({'message': f'Invalid destination_type. Must be one of: {", ".join(VALID_DESTINATION_TYPES)}'}), 400
@@ -393,12 +412,13 @@ def update_ad(_current_user, ad_id):
 
 @ads_api.route('/<int:ad_id>', methods=['DELETE'])
 @super_admin_required
-def delete_ad(_current_user, ad_id):
+def delete_ad(current_user, ad_id):
     ad = db.session.get(Ad, ad_id)
     if not ad:
         return jsonify({'message': 'Ad not found'}), 404
     if ad.status != 'draft':
         return jsonify({'message': 'Only draft ads can be deleted — archive live/paused ads instead to keep their stats.'}), 409
+    log_admin_action(current_user, 'ad_delete', 'ad', ad.id, f'"{ad.name}"')
     db.session.delete(ad)
     db.session.commit()
     return jsonify({'message': 'deleted'})

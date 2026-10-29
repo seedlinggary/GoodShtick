@@ -17,6 +17,7 @@ from backend.estates.modals.estates import (
 from backend.estates.schemas.estates import (
     EstatesListingCardSchema, make_listing_schema,
 )
+from backend.alerts.routes.alert import maybe_send_digests
 
 estates_api = Blueprint('estates_api', __name__, url_prefix='/estates')
 
@@ -452,6 +453,16 @@ def list_listings(current_user):
     by default (see EstatesListing.is_expired) -- pass
     ?include_expired=1&created_by=me (via /my/listings instead, which is the
     only caller that ever needs that) to see them."""
+    # Opportunistic fallback for the alert digest job -- see
+    # backend/alerts/routes/alert.py's module docstring. Previously only
+    # wired into tachlis_post.py's list_posts, which (since Estates and
+    # Money are served on separate domains) meant pure-Estates traffic never
+    # tripped it; a single call anywhere still covers every Alert regardless
+    # of search_type, so this is just a second, independent chance to catch
+    # it sooner than the next cron ping. Cheap (a no-op almost every call)
+    # and never blocks this request.
+    maybe_send_digests()
+
     sort = (request.args.get('sort') or 'random').strip().lower()
     try:
         page = max(1, int(request.args.get('page', 1)))

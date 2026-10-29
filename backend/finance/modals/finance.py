@@ -78,7 +78,10 @@ class FinanceBudget(db.Model):
         self.title = title
 
 
-CALCULATOR_KEYS = ('compound', 'retirement', 'debt', 'emergency', 'goal', 'coast_fire', 'fire_number')
+CALCULATOR_KEYS = (
+    'compound', 'retirement', 'debt', 'emergency', 'goal', 'coast_fire', 'fire_number',
+    'israel_tax', 'israel_investment_tax', 'israel_property_tax',
+)
 
 
 class FinanceSavedScenario(db.Model):

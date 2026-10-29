@@ -157,6 +157,60 @@ def send_still_available_email(poster_email, item_title, confirm_url, site_name)
     })
 
 
+def send_deal_alert_email(follower_email, business_name, post_title, post_body, post_url, unsubscribe_url):
+    """New-deal alert -- fired from backend/business/routes/business_post.py's
+    create_post() to every follower of the business that just posted
+    (BusinessFollow is the opt-in gate; see that model's own docstring).
+    Plain-text preview of the post body, same truncate-and-link shape as
+    send_digest_email's items rather than trying to recreate DealsFeed's
+    own card styling in an email."""
+    resend, from_header = _client()
+    preview = post_body if len(post_body) <= 300 else post_body[:300].rstrip() + '...'
+    html = _wrap(
+        f'<p><strong>{escape(business_name)}</strong> just posted a new deal:</p>'
+        f'<div style="margin:16px 0;padding:16px;background:#f2f5f2;border-radius:10px;">'
+        f'<p style="margin:0 0 8px;font-weight:700;">{escape(post_title)}</p>'
+        f'<p style="margin:0;color:#5b6b63;white-space:pre-wrap;">{escape(preview)}</p>'
+        f'</div>'
+        f'<p>{_button(post_url, "View deal")}</p>'
+        f'<p style="margin-top:20px;"><a href="{unsubscribe_url}" style="color:#96a39c;font-size:12px;">'
+        f'Unfollow {escape(business_name)} to stop these emails</a></p>'
+    )
+    resend.Emails.send({
+        'from': from_header, 'to': [follower_email],
+        'subject': f'New deal from {business_name}: {post_title}',
+        'html': html,
+    })
+
+
+def send_job_match_email(email, post, unsubscribe_url):
+    """Tachlis job-match alert -- fired from
+    backend/tachlis/routes/tachlis_post.py's _notify_job_match_users() to
+    members whose own profile_area/line_of_work looks like a fit, even
+    though they never set up a saved-search Alert for it. `post`:
+    {title, location, compensation, url}. Shares User.weekly_digest_token's
+    unsubscribe link (see that caller) rather than a separate token, since
+    this is gated on the same weekly_digest_enabled consent."""
+    resend, from_header = _client()
+    subtitle = ' · '.join(b for b in (post.get('location'), post.get('compensation')) if b)
+    subtitle_html = f'<p style="margin:0;color:#5b6b63;">{escape(subtitle)}</p>' if subtitle else ''
+    html = _wrap(
+        '<p>A new job post on Gut Money looks like a fit for you:</p>'
+        f'<div style="margin:16px 0;padding:16px;background:#f2f5f2;border-radius:10px;">'
+        f'<p style="margin:0 0 8px;font-weight:700;">{escape(post["title"])}</p>'
+        f'{subtitle_html}'
+        f'</div>'
+        f'<p>{_button(post["url"], "View job")}</p>'
+        f'<p style="margin-top:20px;"><a href="{unsubscribe_url}" style="color:#96a39c;font-size:12px;">'
+        f'Stop getting these match emails</a></p>'
+    )
+    resend.Emails.send({
+        'from': from_header, 'to': [email],
+        'subject': f'New job match: {post["title"]}',
+        'html': html,
+    })
+
+
 def send_job_application_email(employer_email, job_title, applicant_name, applicant_email, cv_summary, note):
     """Stage 5's "one-tap apply" -- reply_to is the applicant's own email
     (same convention as backend/contact/routes/contact.py), so the employer

@@ -1,3 +1,5 @@
+import os
+import secrets
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
@@ -9,9 +11,18 @@ from security import token_required, token_optional, admin_required
 from upload import upload_file
 from backend.business.modals.business import Business, BusinessLocation
 from backend.business.modals.business_post import BusinessPost, BUSINESS_POST_TYPES
+from backend.business.modals.business_follow import BusinessFollow
 from backend.business.schemas.business_post import make_business_post_schema
+from backend.alerts import emails
 
 business_post_api = Blueprint('business_post_api', __name__, url_prefix='/business')
+
+# No fixed production domain for this site is referenced anywhere else in
+# this codebase yet (unlike ESTATES_SITE_URL/TACHLIS_SITE_URL) -- .env.example's
+# own FRONTEND_ORIGINS comment uses "goodshtickbusiness.com" as its one
+# illustrative placeholder, so that's what this falls back to; set
+# BUSINESS_SITE_URL for the real deployed domain.
+BUSINESS_SITE_URL = os.environ.get('BUSINESS_SITE_URL', 'https://www.goodshtickbusiness.com')
 
 PAGE_SIZE = 20
 TITLE_MAX = 150
@@ -126,6 +137,46 @@ def get_post(current_user, post_id):
     return jsonify(schema.dump(post))
 
 
+def _notify_followers_of_new_deal(business, post):
+    """Emails every follower of this business about a brand-new deal post --
+    BusinessFollow's own docstring already calls this out as "the gate for
+    the 'new deal' notify() a business fires"; this is that notify, by
+    email, firing automatically the moment a deal goes up (vs. the existing
+    in-app-only notify() in business_follow.py's broadcast(), which only
+    fires when the owner deliberately sends a message). Synchronous -- no
+    queue/worker infrastructure exists anywhere in this codebase, same as
+    every other email this project sends -- and never lets a bad address or
+    a Resend hiccup for one follower block the rest, or this request."""
+    followers = (BusinessFollow.query
+                 .filter_by(business_id=business.id)
+                 .filter(BusinessFollow.user_id != post.user_id)
+                 .options(selectinload(BusinessFollow.user))
+                 .all())
+    if not followers:
+        return
+
+    post_url = f'{BUSINESS_SITE_URL}/deals?post={post.id}'
+    token_backfilled = False
+    for follow in followers:
+        follower_email = follow.user.email if follow.user else None
+        if not follower_email:
+            continue
+        if not follow.unsubscribe_token:
+            # Lazy backfill for any follow row created before this column
+            # existed -- same convention as EstatesListing.still_available_token.
+            follow.unsubscribe_token = secrets.token_urlsafe(32)
+            token_backfilled = True
+        try:
+            emails.send_deal_alert_email(
+                follower_email, business.name, post.title, post.body, post_url,
+                f'{BUSINESS_SITE_URL}/follow/unsubscribe/{follow.unsubscribe_token}',
+            )
+        except Exception:
+            continue
+    if token_backfilled:
+        db.session.commit()
+
+
 @business_post_api.route('/posts', methods=['POST'])
 @token_required
 def create_post(current_user):
@@ -169,6 +220,12 @@ def create_post(current_user):
     )
     db.session.add(post)
     db.session.commit()
+
+    try:
+        _notify_followers_of_new_deal(business, post)
+    except Exception:
+        pass  # a notify-path bug should never surface as a failed post
+
     schema = make_business_post_schema(current_user, many=False)
     return jsonify(schema.dump(post)), 201
 

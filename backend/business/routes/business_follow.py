@@ -66,6 +66,21 @@ def my_follows(current_user):
     return jsonify(FollowSchema(many=True).dump(rows))
 
 
+@follow_api.route('/follow/unsubscribe/<token>', methods=['GET'])
+def unsubscribe_follow(token):
+    """One-click opt-out for the automatic 'new deal' email (see
+    business_post.py's create_post) -- no login required, same pattern as
+    Alert.unsubscribe_token/User.weekly_digest_token. Unsubscribing just
+    unfollows the business, since following is what opted them in."""
+    follow = BusinessFollow.query.filter_by(unsubscribe_token=token).first()
+    if not follow:
+        return jsonify({'message': 'This is already gone.'}), 404
+    business_name = follow.business.name if follow.business else None
+    db.session.delete(follow)
+    db.session.commit()
+    return jsonify({'message': 'Unfollowed', 'business_name': business_name})
+
+
 @follow_api.route('/businesses/<int:business_id>/broadcast', methods=['POST'])
 @token_required
 def broadcast(current_user, business_id):

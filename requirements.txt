@@ -24,6 +24,7 @@ marshmallow==4.3.0
 marshmallow-sqlalchemy==1.5.0
 openai==1.58.1
 packaging==23.2
+pdfplumber==0.11.4
 psycopg2-binary==2.9.12
 pydantic==2.13.4
 PyJWT==2.13.0

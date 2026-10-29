@@ -17,6 +17,36 @@ from backend.hock.modals.hock_comment import HockComment
 from backend.tachlis.modals.tachlis_post import TachlisPost
 from backend.user.modals.game_score import GameScore
 from backend.user.schemas.game_score import game_scores_schema
+from backend.user.modals.audit_log import AuditLog, log_admin_action
+from backend.user.schemas.audit_log import audit_logs_schema
+from backend.business.modals.business import Business
+from backend.estates.modals.estates import EstatesListing
+from backend.torah.modals.torah import TorahPost
+from backend.ads.modals.ad import Ad
+
+# Shared across every paginated admin list endpoint (/users, /approvals,
+# /audit-log) -- and /ads's list_ads -- so the frontend's prev/next controls
+# and response shape work the same way everywhere in SuperAdmin.
+ADMIN_PAGE_SIZE = 50
+
+
+def _paginate(query, page):
+    """Applies offset/limit for one page of `query` and returns
+    (rows, total). `page` is already normalized to >= 1 by the caller."""
+    total = query.count()
+    rows = query.offset((page - 1) * ADMIN_PAGE_SIZE).limit(ADMIN_PAGE_SIZE).all()
+    return rows, total
+
+
+def _page_param():
+    try:
+        return max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _page_meta(page, total):
+    return {'total': total, 'page': page, 'per_page': ADMIN_PAGE_SIZE, 'has_more': page * ADMIN_PAGE_SIZE < total}
 
 def _admin_options():
     """Eager-load options for admin views. Evaluated at request time after all mappers are ready."""
@@ -63,13 +93,15 @@ def approve_shtick(current_user, shtick_id):
 
 @admin_api.route('/shtick/<int:shtick_id>/unapprove', methods=['POST'])
 @super_admin_required
-def unapprove_shtick(_current_user, shtick_id):
+def unapprove_shtick(current_user, shtick_id):
     """Revert an already-approved (or rejected) post back to the pending queue."""
     shtick = db.session.get(Shtick, shtick_id)
     if not shtick:
         return jsonify({'message': 'Not found'}), 404
     shtick.approved_to_publish = None
     shtick.approved_by = None
+    log_admin_action(current_user, 'unapprove_post', 'shtick', shtick.id,
+                      f'"{shtick.caption[:80]}"' if shtick.caption else None)
     db.session.commit()
     cache.clear()
     return jsonify({'message': 'unapproved'})
@@ -178,33 +210,49 @@ def approve_comment(_current_user, comment_id):
 @admin_api.route('/users', methods=['GET'])
 @super_admin_required
 def list_users(_current_user):
-    users = User.query.order_by(User.pub_date.asc()).all()
+    """Paginated (?page=1.., 50/page). ?role=<role> filters server-side so it
+    composes correctly with pagination -- filtering only the already-loaded
+    page client-side would silently miss matches on every other page."""
+    page = _page_param()
+    role = (request.args.get('role') or '').strip()
+    valid_roles = {'viewer', 'user', 'admin', 'super_admin'}
+
+    query = User.query
+    if role and role != 'all':
+        if role not in valid_roles:
+            return jsonify({'message': f'role must be one of: {", ".join(valid_roles)}'}), 400
+        query = query.filter(User.role == role)
+
+    rows, total = _paginate(query.order_by(User.pub_date.asc()), page)
 
     # Batched counts instead of N+1 lazy-loading each user's four collections
     # (was 1 + 4*N queries for N users -- now a fixed 4 regardless of N).
+    # Grouped over the whole table rather than just this page -- same cost
+    # as before pagination existed, and a per-page WHERE IN would only save
+    # work on tables already small enough not to matter.
     def counts_by_user(group_col):
-        rows = db.session.query(group_col, func.count()).group_by(group_col).all()
-        return dict(rows)
+        counts = db.session.query(group_col, func.count()).group_by(group_col).all()
+        return dict(counts)
 
     shtick_counts = counts_by_user(Shtick.user_id)
     like_counts = counts_by_user(Like.user_id)
     comment_counts = counts_by_user(Comment.user_id)
     game_counts = counts_by_user(GameScore.user_id)
 
-    result = []
-    for u in users:
+    items = []
+    for u in rows:
         data = user_schema.dump(u)
         data['shtick_count'] = shtick_counts.get(u.public_id, 0)
         data['like_count'] = like_counts.get(u.public_id, 0)
         data['comment_count'] = comment_counts.get(u.public_id, 0)
         data['game_count'] = game_counts.get(u.public_id, 0)
-        result.append(data)
-    return jsonify(result)
+        items.append(data)
+    return jsonify({'items': items, **_page_meta(page, total)})
 
 
 @admin_api.route('/users/<public_id>/role', methods=['PATCH'])
 @super_admin_required
-def set_user_role(_current_user, public_id):
+def set_user_role(current_user, public_id):
     body = request.get_json() or {}
     new_role = body.get('role')
     valid_roles = {'viewer', 'user', 'admin', 'super_admin'}
@@ -213,7 +261,25 @@ def set_user_role(_current_user, public_id):
     user = User.query.filter_by(public_id=public_id).first()
     if not user:
         return jsonify({'message': 'User not found'}), 404
+
+    # Belt-and-suspenders against total platform lockout: the frontend
+    # disables this on a user's own row and requires confirmation for any
+    # self-demotion (see SuperAdminDashboard.js's changeRole), which covers
+    # the misclick case. This only blocks the genuinely unrecoverable one --
+    # the sole remaining super_admin demoting themselves, which would leave
+    # literally no one able to undo it short of a direct DB edit. A
+    # self-demotion while other super_admins still exist is still allowed
+    # (deliberately stepping down after handing off control), since any of
+    # them can restore the role with no DB access needed.
+    if (user.public_id == current_user.public_id and new_role != 'super_admin'
+            and User.query.filter_by(role='super_admin').count() <= 1):
+        return jsonify({'message': "You're the only Super Admin -- promote someone else first so you're not locked out."}), 400
+
+    old_role = user.role
     user.role = new_role
+    if old_role != new_role:
+        log_admin_action(current_user, 'role_change', 'user', user.public_id,
+                          f'{user.profile_name or user.email}: {old_role} → {new_role}')
     db.session.commit()
     return jsonify(user_schema.dump(user))
 
@@ -272,11 +338,23 @@ def get_rejected(_current_user):
 @admin_api.route('/approvals', methods=['GET'])
 @super_admin_required
 def approval_history(_current_user):
-    approved = (Shtick.query
-                .options(*_admin_options())
-                .filter(Shtick.approved_by.isnot(None))
-                .order_by(Shtick.pub_date.desc()).all())
-    return jsonify(shticks_schema.dump(approved))
+    page = _page_param()
+    query = (Shtick.query
+             .options(*_admin_options())
+             .filter(Shtick.approved_by.isnot(None)))
+    rows, total = _paginate(query.order_by(Shtick.pub_date.desc()), page)
+    return jsonify({'items': shticks_schema.dump(rows), **_page_meta(page, total)})
+
+
+@admin_api.route('/audit-log', methods=['GET'])
+@super_admin_required
+def list_audit_log(_current_user):
+    """Newest-first feed of logged SuperAdmin actions -- see log_admin_action
+    (backend/user/modals/audit_log.py), called from role changes, ad status
+    changes/deletion, category deletion, and unapproving a post."""
+    page = _page_param()
+    rows, total = _paginate(AuditLog.query.order_by(AuditLog.created_at.desc()), page)
+    return jsonify({'items': audit_logs_schema.dump(rows), **_page_meta(page, total)})
 
 
 SEARCH_LIMIT = 25
@@ -288,12 +366,16 @@ def admin_search(_current_user):
     """Cross-table lookup for the SuperAdmin console's search bar -- checks
     id, title/caption/body/text, category, and submitted-by across every
     content type (Feed posts, Hock posts, Hock comments, Tachlis posts, Feed
-    comments) plus the Users table itself."""
+    comments, Business listings, Estates listings, Torah posts, Ads) plus
+    the Users table itself. Simple ILIKE, same style as the rest of this
+    route -- NOT the Postgres full-text search the separate public-facing
+    /search endpoint uses; that's a different feature and untouched here."""
     q = (request.args.get('q') or '').strip()
     if not q:
         return jsonify({
             'shticks': [], 'hock_posts': [], 'hock_comments': [],
             'tachlis_posts': [], 'comments': [], 'users': [],
+            'businesses': [], 'estates_listings': [], 'torah_posts': [], 'ads': [],
         })
 
     like = f'%{q}%'
@@ -388,9 +470,71 @@ def admin_search(_current_user):
         'email': u.email, 'role': u.role,
     } for u in users]
 
+    business_filters = [Business.name.ilike(like), Business.about.ilike(like)]
+    if is_id:
+        business_filters.append(Business.id == int(q))
+    businesses = (Business.query
+                  .outerjoin(Business.creator)
+                  .filter(db.or_(*business_filters))
+                  .order_by(Business.pub_date.desc())
+                  .distinct().limit(SEARCH_LIMIT).all())
+    businesses_data = [{
+        'id': b.id, 'name': b.name, 'slug': b.slug, 'category': b.category,
+        'pub_date': str(b.pub_date), 'submitted_by': b.creator.profile_name if b.creator else None,
+    } for b in businesses]
+
+    estates_filters = [
+        EstatesListing.title.ilike(like), EstatesListing.description.ilike(like),
+        EstatesListing.neighborhood.ilike(like), EstatesListing.city.ilike(like),
+    ]
+    if is_id:
+        estates_filters.append(EstatesListing.id == int(q))
+    estates_listings = (EstatesListing.query
+                         .outerjoin(EstatesListing.creator)
+                         .filter(db.or_(*estates_filters))
+                         .order_by(EstatesListing.pub_date.desc())
+                         .distinct().limit(SEARCH_LIMIT).all())
+    estates_listings_data = [{
+        'id': e.id, 'title': e.title, 'slug': e.slug, 'listing_type': e.listing_type,
+        'city': e.city, 'neighborhood': e.neighborhood, 'pub_date': str(e.pub_date),
+        'submitted_by': e.creator.profile_name if e.creator else None,
+    } for e in estates_listings]
+
+    torah_filters = [
+        TorahPost.title.ilike(like), TorahPost.body_text.ilike(like), TorahPost.category.ilike(like),
+    ]
+    if is_id:
+        torah_filters.append(TorahPost.id == int(q))
+    torah_posts = (TorahPost.query
+                   .outerjoin(TorahPost.creator)
+                   .filter(db.or_(*torah_filters))
+                   .order_by(TorahPost.pub_date.desc())
+                   .distinct().limit(SEARCH_LIMIT).all())
+    torah_posts_data = [{
+        'id': t.id, 'title': t.title, 'slug': t.slug, 'category': t.category,
+        'pub_date': str(t.pub_date), 'submitted_by': t.creator.profile_name if t.creator else None,
+    } for t in torah_posts]
+
+    ad_filters = [
+        Ad.name.ilike(like), Ad.advertiser_name.ilike(like),
+        Ad.headline.ilike(like), Ad.body_text.ilike(like),
+    ]
+    if is_id:
+        ad_filters.append(Ad.id == int(q))
+    ads = (Ad.query
+           .filter(db.or_(*ad_filters))
+           .order_by(Ad.pub_date.desc())
+           .limit(SEARCH_LIMIT).all())
+    ads_data = [{
+        'id': a.id, 'name': a.name, 'advertiser_name': a.advertiser_name,
+        'headline': a.headline, 'status': a.status, 'pub_date': str(a.pub_date),
+    } for a in ads]
+
     return jsonify({
         'shticks': shticks_data, 'hock_posts': hock_posts_data, 'hock_comments': hock_comments_data,
         'tachlis_posts': tachlis_posts_data, 'comments': comments_data, 'users': users_data,
+        'businesses': businesses_data, 'estates_listings': estates_listings_data,
+        'torah_posts': torah_posts_data, 'ads': ads_data,
     })
 
 

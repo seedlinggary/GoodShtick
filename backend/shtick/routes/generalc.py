@@ -4,6 +4,7 @@ from security import super_admin_required
 from backend.shtick.modals.generalc import Generalc
 from backend.shtick.modals.shtick import Shtick, shtick_categories
 from backend.shtick.schemas.generalc import generalc_schema, generalcs_schema
+from backend.user.modals.audit_log import log_admin_action
 
 generalc_api = Blueprint('generalc_api', __name__, url_prefix='/generalc')
 
@@ -42,7 +43,7 @@ def create_generalc(_current_user):
 
 @generalc_api.route('/<int:generalc_id>', methods=['DELETE'])
 @super_admin_required
-def delete_generalc(_current_user, generalc_id):
+def delete_generalc(current_user, generalc_id):
     cat = db.session.get(Generalc, generalc_id)
     if not cat:
         return jsonify({'message': 'Category not found'}), 404
@@ -52,6 +53,7 @@ def delete_generalc(_current_user, generalc_id):
     if used_as_primary or used_as_tag:
         return jsonify({'message': 'This category is used by existing posts and cannot be deleted.'}), 409
 
+    log_admin_action(current_user, 'category_delete', 'category', cat.id, f'category: {cat.name}')
     db.session.delete(cat)
     db.session.commit()
     cache.clear()

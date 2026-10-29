@@ -616,6 +616,82 @@ def parse_post_draft(_current_user):
     return jsonify(data)
 
 
+def _notify_job_match_users(post):
+    """Tachlis job-match alerts -- proactively emails members whose own
+    profile (profile_area/line_of_work, today used only for feed
+    personalization -- see backend/feed/routes/aggregate.py) looks like a
+    fit for a brand-new job post, even though they never set up a
+    saved-search Alert for it (contrast GetAlertsButton.js's explicit
+    opt-in, which this is not). Only ever called once a post is actually
+    PUBLIC (approved_to_publish is True) -- from create_post itself for the
+    admin/boss auto-approve bypass, or from approve_post once a normal
+    member's pending post clears moderation -- so a matched member's email
+    link is never a 404.
+
+    Gated on weekly_digest_enabled: there's no dedicated opt-out for this
+    yet, and reusing the one existing "send me personalized match emails"
+    consent (rather than inventing a second toggle nobody would know to
+    look for) means turning off the weekly digest also turns this off.
+    Matching is deliberately loose (substring both ways for area, shared
+    word-stem for line_of_work vs. category) since neither profile field is
+    a strictly-enforced vocabulary that lines up one-to-one with a job
+    post's own free-text location/category -- same "loose match over a
+    missed real one" reasoning as _nearby_items_for_user's own area filter
+    in backend/alerts/routes/alert.py. Synchronous and never raises -- same
+    convention as every other email this project sends."""
+    if post.post_type != 'job' or post.approved_to_publish is not True:
+        return
+    if not post.location and not post.category:
+        return
+
+    import secrets
+    from backend.alerts import emails
+    from backend.alerts.routes.alert import MAIN_SITE_URL
+
+    location_l = (post.location or '').strip().lower()
+    category_l = (post.category or '').strip().lower()
+
+    def _area_matches(profile_area):
+        if not profile_area or not location_l:
+            return False
+        area_l = profile_area.strip().lower()
+        return area_l in location_l or location_l in area_l
+
+    def _work_matches(line_of_work):
+        if not line_of_work or not category_l:
+            return False
+        tokens = [t for t in line_of_work.lower().split('_') if len(t) > 2]
+        return any(t in category_l for t in tokens)
+
+    candidates = (User.query
+                  .filter(User.weekly_digest_enabled.is_(True))
+                  .filter(User.public_id != post.user_id)
+                  .filter(User.email.isnot(None), User.email != '')
+                  .filter(db.or_(User.profile_area.isnot(None), User.line_of_work.isnot(None)))
+                  .all())
+    matched = [u for u in candidates if _area_matches(u.profile_area) or _work_matches(u.line_of_work)]
+    if not matched:
+        return
+
+    post_data = {
+        'title': post.title,
+        'location': post.location,
+        'compensation': post.compensation,
+        'url': f'{TACHLIS_SITE_URL}/tachlis/post/{post.id}',
+    }
+    for user in matched:
+        if not user.weekly_digest_token:
+            user.weekly_digest_token = secrets.token_urlsafe(32)
+        try:
+            emails.send_job_match_email(
+                user.email, post_data,
+                f'{MAIN_SITE_URL}/user/weekly-digest/unsubscribe/{user.weekly_digest_token}',
+            )
+        except Exception:
+            continue
+    db.session.commit()
+
+
 @tachlis_api.route('/posts', methods=['POST'])
 @token_required
 def create_post(current_user):
@@ -649,6 +725,12 @@ def create_post(current_user):
 
     db.session.add(post)
     db.session.commit()
+
+    try:
+        _notify_job_match_users(post)
+    except Exception:
+        pass  # a notify-path bug should never surface as a failed post
+
     schema = make_tachlis_post_schema(current_user, many=False, card=False)
     return jsonify(schema.dump(post)), 201
 
@@ -723,6 +805,16 @@ def approve_post(current_user, post_id):
     post.approved_to_publish = approved
     post.approved_by = current_user.public_id
     db.session.commit()
+
+    if approved:
+        # The moderation-queue equivalent of create_post's own notify call --
+        # a normal member's job post only actually goes public here, so this
+        # is the first point its own job-match alert can safely fire.
+        try:
+            _notify_job_match_users(post)
+        except Exception:
+            pass
+
     return jsonify({'message': 'approved' if approved else 'rejected'})
 
 

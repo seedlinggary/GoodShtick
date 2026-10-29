@@ -47,12 +47,14 @@ from backend.estates.routes.estates import estates_api
 from backend.estates.routes.estates_group_buy import group_buy_api
 from backend.finance.routes.finance_market import finance_market_api
 from backend.finance.routes.finance_budget import finance_budget_api
+from backend.finance.routes.form106 import finance_form106_api
 from backend.torah.routes.torah_post import torah_post_api
 from backend.torah.routes.torah_sefaria import torah_sefaria_api
 from backend.torah.routes.torah_zmanim import torah_zmanim_api
 from backend.torah.routes.torah_sheets import torah_sheets_api
 from backend.feed.routes.aggregate import feed_api
 from backend.banner.routes.banner import banner_api
+from backend.search.routes.search import search_api
 from backend.alerts.routes.alert import alerts_api, link_alerts_to_user
 from backend.news.routes.news_article import news_article_api
 from backend.news.routes.news_scraper import news_scraper_api
@@ -61,6 +63,7 @@ from backend.news.routes.news_scraper import news_scraper_api
 # relationship() references, and so Flask-Migrate autogenerate sees them.
 from backend.user.modals.user import User
 from backend.user.modals.game_score import GameScore
+from backend.user.modals.audit_log import AuditLog
 from backend.shtick.modals.shtick import Shtick
 from backend.shtick.modals.generalc import Generalc
 from backend.shtick.modals.like import Like
@@ -150,6 +153,7 @@ application.register_blueprint(estates_api)
 application.register_blueprint(group_buy_api)
 application.register_blueprint(finance_market_api)
 application.register_blueprint(finance_budget_api)
+application.register_blueprint(finance_form106_api)
 application.register_blueprint(torah_post_api)
 application.register_blueprint(torah_sefaria_api)
 application.register_blueprint(torah_zmanim_api)
@@ -159,6 +163,7 @@ application.register_blueprint(news_scraper_api)
 application.register_blueprint(feed_api)
 application.register_blueprint(alerts_api)
 application.register_blueprint(banner_api)
+application.register_blueprint(search_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold
