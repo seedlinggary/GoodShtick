@@ -4,9 +4,10 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from flask import Blueprint, jsonify, request
 
-from config import application, cache
+from config import application, cache, db
 from security import token_required
 from backend.user.modals.user import User
+from backend.user.modals.login_log import log_login
 
 sso_api = Blueprint('sso_api', __name__, url_prefix='/sso')
 
@@ -72,5 +73,8 @@ def exchange_sso_token():
         application.config['SECRET_KEY'],
         algorithm='HS256',
     )
+    log_login(user=user, email_attempted=user.email, site=body.get('site'),
+              method='sso_exchange', success=True, request=request)
+    db.session.commit()
     return jsonify({'token': session_token, 'role': user.role, 'is_boss': user.is_boss,
                     'profile_name': user.profile_name, 'public_id': user.public_id})

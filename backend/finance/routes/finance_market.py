@@ -33,7 +33,15 @@ CACHE_TTL = {
     'chart_weekly': timedelta(hours=24),
     'search': timedelta(days=7),
     'indicator': timedelta(hours=24),
+    'fx': timedelta(hours=12),
+    'fx_currencies': timedelta(days=30),
 }
+
+# Frankfurter (frankfurter.app) -- ECB reference rates, published once daily
+# around 16:00 CET. No API key, no quota -- unlike Alpha Vantage above, so
+# no apikey param and no shared-quota concern here; still cached the same
+# way to avoid hammering a free public service on every page load.
+FRANKFURTER_URL = 'https://api.frankfurter.app'
 
 # TIME_SERIES_DAILY's free-tier "compact" size (the only size the free key
 # can request -- outputsize=full is a premium-only feature, confirmed live)
@@ -175,6 +183,43 @@ def search_symbols():
     if error:
         return jsonify({'message': error}), 502
     return jsonify({'results': payload, 'cached': cached})
+
+
+@finance_market_api.route('/fx', methods=['GET'])
+def get_fx_rate():
+    base = (request.args.get('from') or '').strip().upper()
+    quote = (request.args.get('to') or '').strip().upper()
+    if not base or not quote:
+        return jsonify({'message': 'from and to are required'}), 400
+    if base == quote:
+        return jsonify({'rate': 1.0, 'date': None, 'cached': False})
+
+    def fetch():
+        res = requests.get(f'{FRANKFURTER_URL}/latest', params={'from': base, 'to': quote}, timeout=10)
+        res.raise_for_status()
+        data = res.json()
+        rate = (data.get('rates') or {}).get(quote)
+        if rate is None:
+            raise RuntimeError('No rate returned for this currency pair')
+        return {'rate': rate, 'date': data.get('date')}
+
+    payload, cached, error = _cached(f'fx:{base}_{quote}', CACHE_TTL['fx'], fetch)
+    if error:
+        return jsonify({'message': error}), 502
+    return jsonify({**payload, 'cached': cached})
+
+
+@finance_market_api.route('/fx/currencies', methods=['GET'])
+def get_fx_currencies():
+    def fetch():
+        res = requests.get(f'{FRANKFURTER_URL}/currencies', timeout=10)
+        res.raise_for_status()
+        return res.json()
+
+    payload, cached, error = _cached('fx_currencies', CACHE_TTL['fx_currencies'], fetch)
+    if error:
+        return jsonify({'message': error}), 502
+    return jsonify({'currencies': payload, 'cached': cached})
 
 
 @finance_market_api.route('/indicator/<name>', methods=['GET'])

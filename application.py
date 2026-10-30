@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from werkzeug.security import check_password_hash
 import jwt
 from config import application, db
+from backend.user.modals.login_log import log_login
 
 # Route blueprints
 from backend.user.routes.user import user_api
@@ -65,6 +66,7 @@ from backend.askgut.routes.chat import askgut_api
 from backend.user.modals.user import User
 from backend.user.modals.game_score import GameScore
 from backend.user.modals.audit_log import AuditLog
+from backend.user.modals.login_log import LoginLog
 from backend.askgut.modals.usage import AskGutUsage
 from backend.shtick.modals.shtick import Shtick
 from backend.shtick.modals.generalc import Generalc
@@ -178,13 +180,19 @@ application.register_blueprint(askgut_api)
 def login():
     auth = request.authorization
     if not auth or not auth.username or not auth.password:
+        log_login(user=None, email_attempted=None, site=None, method='password', success=False, request=request)
+        db.session.commit()
         return make_response('Could not verify', 401, {'WWW-Authenticate': 'Basic realm="Login required"'})
 
     user = User.query.filter_by(email=auth.username).first()
     if not user:
+        log_login(user=None, email_attempted=auth.username, site=None, method='password', success=False, request=request)
+        db.session.commit()
         return make_response('Could not verify', 401, {'WWW-Authenticate': 'Basic realm="Login required"'})
 
     if not check_password_hash(user.password, auth.password):
+        log_login(user=user, email_attempted=auth.username, site=None, method='password', success=False, request=request)
+        db.session.commit()
         return make_response('Could not verify', 401, {'WWW-Authenticate': 'Basic realm="Login required"'})
 
     # First person ever to log in becomes super_admin
@@ -192,6 +200,7 @@ def login():
         user.role = 'super_admin'
 
     user.last_login = datetime.now(timezone.utc)
+    log_login(user=user, email_attempted=auth.username, site=None, method='password', success=True, request=request)
     db.session.commit()
     link_alerts_to_user(user)
 

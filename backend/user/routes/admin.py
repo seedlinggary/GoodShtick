@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from flask import Blueprint, jsonify, request
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
@@ -19,6 +21,8 @@ from backend.user.modals.game_score import GameScore
 from backend.user.schemas.game_score import game_scores_schema
 from backend.user.modals.audit_log import AuditLog, log_admin_action
 from backend.user.schemas.audit_log import audit_logs_schema
+from backend.user.modals.login_log import LoginLog
+from backend.user.schemas.login_log import login_logs_schema
 from backend.business.modals.business import Business
 from backend.estates.modals.estates import EstatesListing
 from backend.torah.modals.torah import TorahPost
@@ -355,6 +359,32 @@ def list_audit_log(_current_user):
     page = _page_param()
     rows, total = _paginate(AuditLog.query.order_by(AuditLog.created_at.desc()), page)
     return jsonify({'items': audit_logs_schema.dump(rows), **_page_meta(page, total)})
+
+
+@admin_api.route('/login-log', methods=['GET'])
+@super_admin_required
+def list_login_log(_current_user):
+    """Newest-first feed of login attempts (password and SSO-exchange),
+    success and failure alike -- see log_login
+    (backend/user/modals/login_log.py), called from /login and
+    /sso/exchange."""
+    page = _page_param()
+    query = LoginLog.query.order_by(LoginLog.created_at.desc())
+    days = request.args.get('days', type=int)
+    if days:
+        query = query.filter(LoginLog.created_at >= datetime.utcnow() - timedelta(days=days))
+    site = (request.args.get('site') or '').strip()
+    if site:
+        query = query.filter(LoginLog.site == site)
+    success = request.args.get('success')
+    if success in ('0', '1'):
+        query = query.filter(LoginLog.success == (success == '1'))
+    q = (request.args.get('q') or '').strip()
+    if q:
+        query = (query.outerjoin(User, User.public_id == LoginLog.user_id)
+                 .filter(db.or_(LoginLog.email_attempted.ilike(f'%{q}%'), User.profile_name.ilike(f'%{q}%'))))
+    rows, total = _paginate(query, page)
+    return jsonify({'items': login_logs_schema.dump(rows), **_page_meta(page, total)})
 
 
 SEARCH_LIMIT = 25

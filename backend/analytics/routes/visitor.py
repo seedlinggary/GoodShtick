@@ -149,16 +149,24 @@ def _filter_site(query, model, site):
 
 
 def _visitor_counts(days, staff_ids, site=None):
+    """Logged-in visitors are deduped by user_id (stable across every
+    anonymous_id they might show up under -- different device, cleared
+    localStorage, or any of the 6 sub-site origins, since VisitorSession.
+    user_id is the same value everywhere per the SSO flow); anonymous
+    visitors, who have no user_id, are still deduped by anonymous_id. Deduping
+    everyone by anonymous_id (the old behavior) double/triple-counted any
+    logged-in visitor who showed up under more than one anonymous_id."""
     cutoff = datetime.utcnow() - timedelta(days=days)
     base = _exclude_staff(VisitorSession.query.filter(
         VisitorSession.last_seen >= cutoff,
         VisitorSession.is_localhost.is_(False),
     ), staff_ids)
     base = _filter_site(base, VisitorSession, site)
-    total = base.with_entities(func.count(func.distinct(VisitorSession.anonymous_id))).scalar() or 0
     logged_in = (base.filter(VisitorSession.user_id.isnot(None))
+                 .with_entities(func.count(func.distinct(VisitorSession.user_id))).scalar() or 0)
+    anonymous = (base.filter(VisitorSession.user_id.is_(None))
                  .with_entities(func.count(func.distinct(VisitorSession.anonymous_id))).scalar() or 0)
-    return {'total': total, 'logged_in': logged_in, 'anonymous': total - logged_in}
+    return {'total': logged_in + anonymous, 'logged_in': logged_in, 'anonymous': anonymous}
 
 
 def _visitor_day_stats(site=None):
@@ -228,6 +236,68 @@ def _daily_new_vs_returning(days, staff_ids, day_stats_by_id, site=None):
     return [{'date': d, **counts} for d, counts in sorted(daily.items())]
 
 
+SESSION_GAP_MINUTES = 30
+
+
+def _session_duration_stats(days, staff_ids, site=None):
+    """Splits each anonymous_id's events into visit segments -- consecutive
+    events with no gap over SESSION_GAP_MINUTES count as the same visit, a
+    bigger gap starts a new one -- and summarizes how long visits last.
+    Deliberately a plain Python loop over an already-fetched, ordered query
+    result rather than a SQL window function: this codebase has no window-
+    function precedent elsewhere, and the dataset is small at this site's
+    (solo-scale) traffic volume."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    query = (db.session.query(VisitorEvent.anonymous_id, VisitorEvent.created_at)
+             .join(VisitorSession, VisitorSession.anonymous_id == VisitorEvent.anonymous_id)
+             .filter(VisitorEvent.created_at >= cutoff, VisitorSession.is_localhost.is_(False)))
+    query = _filter_site(query, VisitorEvent, site)
+    if staff_ids:
+        query = query.filter(db.or_(VisitorSession.user_id.is_(None),
+                                     ~VisitorSession.user_id.in_(staff_ids)))
+    rows = query.distinct().order_by(VisitorEvent.anonymous_id, VisitorEvent.created_at).all()
+
+    durations = []
+    current_id = None
+    seg_first = seg_last = None
+    for anon_id, created_at in rows:
+        if anon_id != current_id:
+            if seg_first is not None:
+                durations.append((seg_last - seg_first).total_seconds() / 60)
+            current_id = anon_id
+            seg_first = seg_last = created_at
+        else:
+            if (created_at - seg_last).total_seconds() > SESSION_GAP_MINUTES * 60:
+                durations.append((seg_last - seg_first).total_seconds() / 60)
+                seg_first = created_at
+            seg_last = created_at
+    if seg_first is not None:
+        durations.append((seg_last - seg_first).total_seconds() / 60)
+
+    if not durations:
+        return {'avg_minutes': 0, 'bounce_rate': 0}
+    non_zero = [d for d in durations if d > 0]
+    avg_minutes = round(sum(non_zero) / len(non_zero), 1) if non_zero else 0
+    bounce_rate = round(100 * sum(1 for d in durations if d == 0) / len(durations), 1)
+    return {'avg_minutes': avg_minutes, 'bounce_rate': bounce_rate}
+
+
+def _top_paths(days, staff_ids, site=None, limit=10):
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    query = (db.session.query(VisitorEvent.path, func.count().label('count'))
+             .join(VisitorSession, VisitorSession.anonymous_id == VisitorEvent.anonymous_id)
+             .filter(VisitorEvent.created_at >= cutoff, VisitorSession.is_localhost.is_(False),
+                     VisitorEvent.path.isnot(None), VisitorEvent.path != ''))
+    query = _filter_site(query, VisitorEvent, site)
+    if staff_ids:
+        query = query.filter(db.or_(VisitorSession.user_id.is_(None),
+                                     ~VisitorSession.user_id.in_(staff_ids)))
+    rows = (query.group_by(VisitorEvent.path)
+            .order_by(func.count().desc())
+            .limit(limit).all())
+    return [{'path': p, 'count': n} for p, n in rows]
+
+
 def build_dashboard_payload(site=None):
     """Shared by the whole-platform dashboard (site=None) and the
     Business-only one (site='business', see business_analytics.py) -- same
@@ -275,14 +345,27 @@ def build_dashboard_payload(site=None):
         .all())
     daily_trend = [{'date': str(d), 'count': n} for d, n in trend_rows]
 
-    return {
+    payload = {
         'visitors': visitors,
         'avg_page_views': avg_page_views,
         'top_countries': top_countries,
         'daily_trend': daily_trend,
         'new_vs_returning': new_vs_returning,
         'daily_new_vs_returning': daily_new_vs_returning,
+        'session_duration': _session_duration_stats(7, staff_ids, site),
+        'top_paths': _top_paths(7, staff_ids, site),
     }
+
+    # Per-sub-site breakdown -- only meaningful on the whole-platform view;
+    # the Business-only dashboard (site='business') is already scoped to one
+    # site, so a by_site breakdown of it would just repeat the same number.
+    if site is None:
+        payload['by_site'] = [
+            {'site': key, 'label': label, **_visitor_counts(7, staff_ids, site=key)}
+            for key, label in SITE_LABELS.items()
+        ]
+
+    return payload
 
 
 @analytics_api.route('/dashboard', methods=['GET'])
