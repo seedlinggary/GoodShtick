@@ -47,6 +47,17 @@ class NewsArticle(db.Model):
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     views_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
 
+    # Guest ("post without an account") fields -- only set when created_by
+    # is None (see routes/news_article.py's create_guest_article).
+    # guest_manage_token is the no-login credential: a private link emailed
+    # to the poster (see backend/alerts/emails.py's
+    # send_guest_submission_email) that lets them view/edit/delete this
+    # article purely by presenting the token, same shape as TachlisPost's
+    # still_available_token.
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
+
     likes = db.relationship('NewsArticleLike', backref='article', lazy=True, cascade='all, delete-orphan')
     creator = db.relationship('User', foreign_keys=[created_by], backref=db.backref('news_articles', lazy=True))
 

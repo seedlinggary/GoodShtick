@@ -1,3 +1,5 @@
+import os
+import secrets
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
@@ -32,6 +34,10 @@ WEBSITE_MAX = 300
 SOURCE_URL_MAX = 500
 SOURCE_NAME_MAX = 150
 WEEKDAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
+
+BUSINESS_SITE_URL = os.environ.get('BUSINESS_SITE_URL', 'https://www.goodshtickbusiness.com')
 
 
 def _feed_options():
@@ -139,6 +145,8 @@ def business_stats():
     exclude_categories = [c.strip().lower() for c in (request.args.get('exclude_categories') or '').split(',') if c.strip()]
 
     def _scoped(query, business_id_col):
+        query = query.filter(business_id_col.in_(
+            db.session.query(Business.id).filter(Business.approved_to_publish.is_(True))))
         if categories:
             query = query.filter(business_id_col.in_(
                 db.session.query(Business.id).filter(Business.category.in_(categories))))
@@ -147,7 +155,7 @@ def business_stats():
                 db.session.query(Business.id).filter(Business.category.notin_(exclude_categories))))
         return query
 
-    business_query = db.session.query(Business.id)
+    business_query = db.session.query(Business.id).filter(Business.approved_to_publish.is_(True))
     if categories:
         business_query = business_query.filter(Business.category.in_(categories))
     if exclude_categories:
@@ -164,7 +172,8 @@ def business_stats():
         .filter(BusinessLocation.country.isnot(None), BusinessLocation.country != ''),
         BusinessLocation.business_id,
     ).scalar() or 0
-    total_categories_query = db.session.query(func.count(func.distinct(Business.category)))
+    total_categories_query = db.session.query(func.count(func.distinct(Business.category))).filter(
+        Business.approved_to_publish.is_(True))
     if categories:
         total_categories_query = total_categories_query.filter(Business.category.in_(categories))
     if exclude_categories:
@@ -172,6 +181,7 @@ def business_stats():
     total_categories = total_categories_query.scalar() or 0
     total_claimed = db.session.query(func.count(Business.id)).filter(
         Business.owner_user_id.isnot(None),
+        Business.approved_to_publish.is_(True),
         *([Business.category.in_(categories)] if categories else []),
         *([Business.category.notin_(exclude_categories)] if exclude_categories else []),
     ).scalar() or 0
@@ -203,7 +213,8 @@ def sitemap_data():
     since a full business list payload would be wasteful for a job that just
     needs to print <url> entries; there's no separate updated_at column, so
     pub_date is the best lastmod proxy available."""
-    rows = db.session.query(Business.slug, Business.category, Business.pub_date).all()
+    rows = (db.session.query(Business.slug, Business.category, Business.pub_date)
+            .filter(Business.approved_to_publish.is_(True)).all())
     return jsonify({
         'businesses': [
             {'slug': slug, 'category': category, 'updated': pub_date.isoformat() if pub_date else None}
@@ -256,7 +267,7 @@ def list_businesses(current_user):
     # for why this is opportunistic rather than a real cron job.
     maybe_publish_due_posts()
 
-    query = Business.query.options(*_feed_options())
+    query = Business.query.options(*_feed_options()).filter(Business.approved_to_publish.is_(True))
 
     if category:
         if category not in BUSINESS_CATEGORIES:
@@ -379,7 +390,7 @@ def get_business(current_user, identifier):
     """Looked up by numeric id or slug."""
     query = Business.query.options(*_feed_options())
     business = query.filter_by(id=int(identifier)).first() if identifier.isdigit() else query.filter_by(slug=identifier).first()
-    if not business:
+    if not business or (business.approved_to_publish is not True and not _can_manage(business, current_user)):
         return jsonify({'message': 'Business not found'}), 404
     schema = make_business_schema(current_user, many=False, card=False)
     data = schema.dump(business)
@@ -444,6 +455,7 @@ def create_business(current_user):
         # "imported" exactly when it comes with a source citation rather
         # than being entered firsthand by/for the business itself.
         imported=bool(source_url or source_name),
+        approved_to_publish=True,
     )
     db.session.add(business)
     db.session.flush()
@@ -458,6 +470,169 @@ def create_business(current_user):
     db.session.commit()
     schema = make_business_schema(current_user, many=False, card=False)
     return jsonify(schema.dump(business)), 201
+
+
+@business_api.route('/businesses/guest', methods=['POST'])
+def create_guest_business():
+    """Same validation as create_business, minus the login requirement --
+    goes into the pending queue instead of live immediately (see
+    Business.approved_to_publish). This is how "discount"/deal coverage
+    is offered to a guest without opening deal-posting itself to anyone
+    anonymous: get the business listed first, then claim it for real."""
+    body = request.get_json() or {}
+    name = (body.get('name') or '').strip()
+    category = (body.get('category') or '').strip().lower()
+    about = (body.get('about') or '').strip()
+
+    if not name:
+        return jsonify({'message': 'Name is required'}), 400
+    if len(name) > NAME_MAX:
+        return jsonify({'message': f'Name must be {NAME_MAX} characters or fewer'}), 400
+    if category not in BUSINESS_CATEGORIES:
+        return jsonify({'message': f'category must be one of: {", ".join(BUSINESS_CATEGORIES)}'}), 400
+    if len(about) > ABOUT_MAX:
+        return jsonify({'message': f'About must be {ABOUT_MAX} characters or fewer'}), 400
+    attributes = body.get('attributes')
+    if attributes is not None and not isinstance(attributes, dict):
+        return jsonify({'message': 'attributes must be an object'}), 400
+
+    website = (body.get('website') or '').strip()
+    if len(website) > WEBSITE_MAX:
+        return jsonify({'message': f'Website must be {WEBSITE_MAX} characters or fewer'}), 400
+
+    guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (body.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    business = Business(
+        slug=_unique_slug(name),
+        name=name,
+        category=category,
+        about=about or None,
+        logo=body.get('logo') or None,
+        created_by=None,
+        attributes=attributes,
+        website=website or None,
+        approved_to_publish=None,
+        guest_email=guest_email or None,
+        guest_phone=guest_phone or None,
+        guest_manage_token=secrets.token_urlsafe(32),
+    )
+    db.session.add(business)
+    db.session.flush()
+
+    for loc_body in (body.get('locations') or []):
+        error, fields = _validate_location(loc_body)
+        if error:
+            db.session.rollback()
+            return error, 400
+        db.session.add(BusinessLocation(business_id=business.id, **fields))
+
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            emails.send_guest_submission_email(
+                guest_email, 'your business listing', business.name,
+                f'{BUSINESS_SITE_URL}/guest/business/{business.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    schema = make_business_schema(None, many=False, card=False)
+    data = schema.dump(business)
+    data['guest_manage_token'] = business.guest_manage_token
+    return jsonify(data), 201
+
+
+@business_api.route('/businesses/guest/<token>', methods=['GET'])
+def get_guest_business(token):
+    business = Business.query.options(*_feed_options()).filter_by(guest_manage_token=token).first()
+    if not business:
+        return jsonify({'message': 'Business not found'}), 404
+    schema = make_business_schema(None, many=False, card=False)
+    return jsonify(schema.dump(business))
+
+
+@business_api.route('/businesses/guest/<token>', methods=['PATCH'])
+def edit_guest_business(token):
+    business = Business.query.filter_by(guest_manage_token=token).first()
+    if not business:
+        return jsonify({'message': 'Business not found'}), 404
+
+    body = request.get_json() or {}
+    if 'name' in body:
+        name = (body.get('name') or '').strip()
+        if not name:
+            return jsonify({'message': 'Name is required'}), 400
+        if len(name) > NAME_MAX:
+            return jsonify({'message': f'Name must be {NAME_MAX} characters or fewer'}), 400
+        business.name = name
+    if 'category' in body:
+        category = (body.get('category') or '').strip().lower()
+        if category not in BUSINESS_CATEGORIES:
+            return jsonify({'message': f'category must be one of: {", ".join(BUSINESS_CATEGORIES)}'}), 400
+        business.category = category
+    if 'about' in body:
+        about = (body.get('about') or '').strip()
+        if len(about) > ABOUT_MAX:
+            return jsonify({'message': f'About must be {ABOUT_MAX} characters or fewer'}), 400
+        business.about = about or None
+    if 'logo' in body:
+        business.logo = body.get('logo') or None
+    if 'website' in body:
+        website = (body.get('website') or '').strip()
+        if len(website) > WEBSITE_MAX:
+            return jsonify({'message': f'Website must be {WEBSITE_MAX} characters or fewer'}), 400
+        business.website = website or None
+    if 'attributes' in body:
+        attributes = body.get('attributes')
+        if attributes is not None and not isinstance(attributes, dict):
+            return jsonify({'message': 'attributes must be an object'}), 400
+        business.attributes = attributes
+
+    db.session.commit()
+    schema = make_business_schema(None, many=False, card=False)
+    return jsonify(schema.dump(business))
+
+
+@business_api.route('/businesses/guest/<token>', methods=['DELETE'])
+def delete_guest_business(token):
+    business = Business.query.filter_by(guest_manage_token=token).first()
+    if not business:
+        return jsonify({'message': 'Business not found'}), 404
+    db.session.delete(business)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'})
+
+
+@business_api.route('/admin/businesses/pending', methods=['GET'])
+@admin_required
+def get_pending_businesses(_current_user):
+    pending = (Business.query.options(*_feed_options())
+               .filter_by(approved_to_publish=None)
+               .order_by(Business.pub_date.asc()).all())
+    schema = make_business_schema(None, many=True, card=False)
+    return jsonify(schema.dump(pending))
+
+
+@business_api.route('/admin/businesses/<int:business_id>/approve', methods=['POST'])
+@admin_required
+def approve_business(_current_user, business_id):
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({'message': 'Business not found'}), 404
+    body = request.get_json(silent=True) or {}
+    approved = not body.get('reject', False)
+    business.approved_to_publish = approved
+    db.session.commit()
+    return jsonify({'message': 'approved' if approved else 'rejected'})
 
 
 @business_api.route('/businesses/<int:business_id>', methods=['PATCH'])

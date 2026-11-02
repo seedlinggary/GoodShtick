@@ -26,7 +26,19 @@ class TachlisPost(db.Model):
     contact = db.Column(db.String(300), nullable=False)
     location = db.Column(db.String(120), nullable=True)
     compensation = db.Column(db.String(120), nullable=True)
-    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False, index=True)
+    # Nullable -- a guest (no-account) post has no user_id at all (see
+    # routes/tachlis_post.py's create_guest_post), identified instead by its
+    # own guest_email/guest_phone + guest_manage_token below.
+    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=True, index=True)
+    # Guest ("post without an account") fields -- only set when user_id is
+    # None. guest_manage_token is the no-login credential: a private link
+    # emailed to the poster (see backend/alerts/emails.py's
+    # send_guest_submission_email) that lets them view/edit/renew/delete
+    # this post purely by presenting the token, same shape as
+    # still_available_token above.
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     # When this post actually went up in its source WhatsApp group --
     # distinct from pub_date (when it was added to this DB). NULL for posts
@@ -71,6 +83,14 @@ class TachlisPost(db.Model):
     # manage that business -- never trust-on-input from the client.
     business_id = db.Column(db.Integer, db.ForeignKey('business.id'), nullable=True, index=True)
 
+    # Geocoded from `location` (best-effort, via Photon -- see
+    # routes/tachlis_post.py's _geocode) so Community Profile pages can find
+    # nearby job posts. Populated automatically on create/edit going
+    # forward; NULL for any existing post until it's next edited -- that's
+    # fine, not backfilled.
+    lat = db.Column(db.Float, nullable=True, index=True)
+    lng = db.Column(db.Float, nullable=True, index=True)
+
     __table_args__ = (
         # Matches the exact filter+sort pattern used by the public listing
         # query: WHERE approved_to_publish = ... ORDER BY pub_date DESC.
@@ -87,12 +107,16 @@ class TachlisPost(db.Model):
     def __init__(self, post_type, title, body, contact, user_id,
                  location=None, compensation=None, expires_at=None,
                  category=None, remote=None, source_posted_at=None,
-                 business_id=None):
+                 business_id=None, lat=None, lng=None,
+                 guest_email=None, guest_phone=None, guest_manage_token=None):
         self.post_type = post_type
         self.title = title
         self.body = body
         self.contact = contact
         self.user_id = user_id
+        self.guest_email = guest_email
+        self.guest_phone = guest_phone
+        self.guest_manage_token = guest_manage_token
         self.location = location
         self.compensation = compensation
         self.expires_at = expires_at
@@ -100,6 +124,8 @@ class TachlisPost(db.Model):
         self.remote = remote
         self.source_posted_at = source_posted_at
         self.business_id = business_id
+        self.lat = lat
+        self.lng = lng
 
     @property
     def is_expired(self):

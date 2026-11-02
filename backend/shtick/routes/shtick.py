@@ -1,4 +1,6 @@
 import hashlib
+import os
+import secrets
 import time
 import uuid
 from datetime import datetime, timezone
@@ -390,6 +392,106 @@ def create_shtick(current_user):
 
     db.session.commit()
     return jsonify(shtick_schema.dump(new_shtick)), 201
+
+
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
+
+
+# ── Guest (no-account) post routes ──────────────────────────────────────────
+# "Post without an account" -- anyone can submit a Shtick post with just an
+# email or phone. Needs ZERO new moderation logic: every non-is_boss post
+# already lands pending (approved_to_publish=None) by default, the exact
+# same queue a brand-new member's first post already goes through -- a
+# guest post just sets user_id=None instead of a real public_id. No
+# edit/delete route exists for ANY Shtick post today, guest or not, so the
+# guest-manage capability here is a status check only, not an invented
+# capability real accounts don't even have.
+@shtick_api.route('/guest', methods=['POST'])
+def create_guest_shtick():
+    body = request.get_json() or {}
+    if not body or not body.get('caption'):
+        return jsonify({'message': 'Caption is required'}), 400
+    if len(body['caption']) > 120:
+        return jsonify({'message': 'Caption must be 120 characters or fewer'}), 400
+    if body.get('credit') and len(body['credit']) > 125:
+        return jsonify({'message': 'Credit must be 125 characters or fewer'}), 400
+
+    category_ids = list(body.get('category_ids') or [])
+    primary_id = body.get('category_id')
+    if primary_id and primary_id not in category_ids:
+        category_ids = [primary_id] + category_ids
+    if not category_ids:
+        return jsonify({'message': 'Please select at least one category'}), 400
+
+    guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (body.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    new_shtick = Shtick(
+        caption=body['caption'],
+        credit=body.get('credit', ''),
+        specific_category=body.get('specific_category', ''),
+        user_id=None,
+        generalc_id=category_ids[0],
+    )
+    new_shtick.guest_email = guest_email or None
+    new_shtick.guest_phone = guest_phone or None
+    new_shtick.guest_manage_token = secrets.token_urlsafe(32)
+    # Force-pending no matter what -- a guest is never is_boss, so the
+    # existing auto-approve branch above never applies here anyway, but
+    # set it explicitly so this can never silently change if that branch
+    # is ever refactored.
+    new_shtick.approved_to_publish = None
+
+    db.session.add(new_shtick)
+    db.session.flush()
+
+    for cat_id in category_ids:
+        cat = db.session.get(Generalc, cat_id)
+        if cat and cat not in new_shtick.categories:
+            new_shtick.categories.append(cat)
+
+    content = body.get('content')
+    url = body.get('url')
+    picture = body.get('picture')
+    if content:
+        db.session.add(Content(stuff=content, shtick_id=new_shtick.id))
+    if url:
+        db.session.add(Url(name=url, shtick_id=new_shtick.id))
+    if picture:
+        db.session.add(Picture(name=picture, shtick_id=new_shtick.id))
+
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            import os as _os
+            site_url = _os.environ.get('FRONTEND_URL', 'https://www.goodshtick.com')
+            emails.send_guest_submission_email(
+                guest_email, 'your Shtick post', new_shtick.caption,
+                f'{site_url}/guest/shtick/{new_shtick.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    data = shtick_schema.dump(new_shtick)
+    data['guest_manage_token'] = new_shtick.guest_manage_token
+    return jsonify(data), 201
+
+
+@shtick_api.route('/guest/<token>', methods=['GET'])
+def get_guest_shtick(token):
+    shtick = Shtick.query.filter_by(guest_manage_token=token).first()
+    if not shtick:
+        return jsonify({'message': 'Post not found'}), 404
+    return jsonify(shtick_schema.dump(shtick))
 
 
 @shtick_api.route('/upload', methods=['POST'])

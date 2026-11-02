@@ -9,17 +9,39 @@ class Comment(db.Model):
     text = db.Column(db.Text, nullable=False)
     pub_date = db.Column(db.DateTime, default=datetime.utcnow)
     shtick_id = db.Column(db.Integer, db.ForeignKey('shtick.id'), nullable=False, index=True)
-    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False)
-    # Visible by default -- this is a moderation takedown switch for super_admin,
-    # not a pre-publish gate like Shtick/Tachlis's approved_to_publish.
-    approved_to_publish = db.Column(db.Boolean, default=True, server_default='true', nullable=False)
+    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=True)
+    # True = visible, False = taken down by a moderator, None = a pending
+    # guest comment awaiting admin review (see routes/comment.py's guest
+    # block) -- every existing non-guest comment create path still sets
+    # this True immediately (via __init__'s own default below), so
+    # get_comments' existing `filter_by(approved_to_publish=True)` already
+    # excludes a pending guest comment with zero route-filter changes
+    # needed. Deliberately no Python-side `default=` AND no
+    # `server_default=` here -- either one makes SQLAlchemy quietly
+    # substitute True whenever the ORM attribute is None at flush time
+    # (confirmed live), which would clobber a guest comment's real None
+    # right back to True. __init__'s own `approved_to_publish=True`
+    # parameter default already covers every non-guest call site.
+    approved_to_publish = db.Column(db.Boolean, nullable=True)
+
+    # Guest posting: filled only when this comment was submitted without an
+    # account. guest_manage_token is the no-login credential -- a private
+    # link emailed to the submitter, validated purely by this unique token.
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
 
     user = db.relationship('User', backref=db.backref('comments', lazy=True))
 
-    def __init__(self, text, shtick_id, user_id):
+    def __init__(self, text, shtick_id, user_id=None, approved_to_publish=True,
+                 guest_email=None, guest_phone=None, guest_manage_token=None):
         self.text = text
         self.shtick_id = shtick_id
         self.user_id = user_id
+        self.approved_to_publish = approved_to_publish
+        self.guest_email = guest_email
+        self.guest_phone = guest_phone
+        self.guest_manage_token = guest_manage_token
 
     def __repr__(self):
         return f'Comment({self.id}) by {self.user_id}'

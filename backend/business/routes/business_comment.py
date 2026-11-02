@@ -1,3 +1,5 @@
+import os
+
 from flask import Blueprint, jsonify, request
 from sqlalchemy.orm import selectinload
 
@@ -11,6 +13,9 @@ business_comment_api = Blueprint('business_comment_api', __name__, url_prefix='/
 
 PAGE_SIZE = 20
 BODY_MAX = 1000
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
+BUSINESS_SITE_URL = os.environ.get('BUSINESS_SITE_URL', 'https://www.goodshtickbusiness.com')
 
 
 @business_comment_api.route('/businesses/<int:business_id>/comments', methods=['GET'])
@@ -49,6 +54,74 @@ def create_comment(current_user, business_id):
     db.session.commit()
     schema = make_comment_schema(current_user, many=False)
     return jsonify(schema.dump(comment)), 201
+
+
+@business_comment_api.route('/businesses/<int:business_id>/comments/guest', methods=['POST'])
+def create_guest_comment(business_id):
+    """Same as create_comment, minus the login requirement -- lands pending
+    (approved_to_publish=None) instead of visible immediately."""
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({'message': 'Business not found'}), 404
+
+    req = request.get_json() or {}
+    body = (req.get('body') or '').strip()
+    if not body:
+        return jsonify({'message': 'Comment cannot be empty'}), 400
+    if len(body) > BODY_MAX:
+        return jsonify({'message': f'Comment must be {BODY_MAX} characters or fewer'}), 400
+
+    guest_email = (req.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (req.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    import secrets
+    comment = BusinessComment(
+        business_id=business_id, user_id=None, body=body, approved_to_publish=None,
+        guest_email=guest_email or None, guest_phone=guest_phone or None,
+        guest_manage_token=secrets.token_urlsafe(32),
+    )
+    db.session.add(comment)
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            emails.send_guest_submission_email(
+                guest_email, 'your comment', 'your comment',
+                f'{BUSINESS_SITE_URL}/guest/business-comment/{comment.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    schema = make_comment_schema(None, many=False)
+    data = schema.dump(comment)
+    data['guest_manage_token'] = comment.guest_manage_token
+    return jsonify(data), 201
+
+
+@business_comment_api.route('/comments/guest/<token>', methods=['GET'])
+def get_guest_comment(token):
+    comment = BusinessComment.query.filter_by(guest_manage_token=token).first()
+    if not comment:
+        return jsonify({'message': 'Comment not found'}), 404
+    schema = make_comment_schema(None, many=False)
+    return jsonify(schema.dump(comment))
+
+
+@business_comment_api.route('/comments/guest/<token>', methods=['DELETE'])
+def delete_guest_comment(token):
+    comment = BusinessComment.query.filter_by(guest_manage_token=token).first()
+    if not comment:
+        return jsonify({'message': 'Comment not found'}), 404
+    db.session.delete(comment)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'})
 
 
 @business_comment_api.route('/comments/<int:comment_id>', methods=['DELETE'])

@@ -46,6 +46,7 @@ from backend.business.routes.minyan import minyan_api
 from backend.business.routes.admin_integrations import admin_integrations_api
 from backend.estates.routes.estates import estates_api
 from backend.estates.routes.estates_group_buy import group_buy_api
+from backend.marketplace.routes.marketplace import marketplace_api
 from backend.finance.routes.finance_market import finance_market_api
 from backend.finance.routes.finance_budget import finance_budget_api
 from backend.finance.routes.form106 import finance_form106_api
@@ -68,6 +69,7 @@ from backend.user.modals.game_score import GameScore
 from backend.user.modals.audit_log import AuditLog
 from backend.user.modals.login_log import LoginLog
 from backend.askgut.modals.usage import AskGutUsage
+from backend.guest.modals.guest_throttle import GuestSubmissionThrottle
 from backend.shtick.modals.shtick import Shtick
 from backend.shtick.modals.generalc import Generalc
 from backend.shtick.modals.like import Like
@@ -154,6 +156,7 @@ application.register_blueprint(admin_integrations_api)
 application.register_blueprint(community_api)
 application.register_blueprint(minyan_api)
 application.register_blueprint(estates_api)
+application.register_blueprint(marketplace_api)
 application.register_blueprint(group_buy_api)
 application.register_blueprint(finance_market_api)
 application.register_blueprint(finance_budget_api)

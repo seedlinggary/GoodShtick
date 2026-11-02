@@ -188,6 +188,7 @@ class CommentSchema(Schema):
     user = fields.Nested(UserPublicSchema)
     body = fields.Str()
     pub_date = fields.DateTime()
+    approved_to_publish = fields.Bool(allow_none=True)
     is_own_comment = fields.Method('get_is_own_comment')
 
     def get_is_own_comment(self, obj):

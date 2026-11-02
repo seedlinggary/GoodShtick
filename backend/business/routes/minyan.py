@@ -5,12 +5,13 @@ office 3/2026", "posted sign in shul") is accepted too. Every read path that
 returns minyan data pairs it with a disclaimer to confirm with the shul
 directly, since times shift with the season/the sun and shuls change them
 without us finding out."""
+import os
 from datetime import datetime, time as dtime
 
 from flask import Blueprint, jsonify, request
 
 from config import db
-from security import token_required, token_optional
+from security import token_required, token_optional, admin_required
 from backend.business.modals.business import Business
 from backend.business.modals.minyan import Minyan, TEFILAH_TYPES, RELATIVE_ANCHORS
 from backend.business.schemas.community import MinyanSchema
@@ -22,6 +23,9 @@ DISCLAIMER = ('Minyan times can change with the season, the day of the week, or 
 
 LABEL_MAX, DAYS_MAX, SEASON_MAX, NOTES_MAX = 150, 100, 60, 300
 SOURCE_NAME_MAX, SOURCE_URL_MAX = 200, 500
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
+BUSINESS_SITE_URL = os.environ.get('BUSINESS_SITE_URL', 'https://www.goodshtickbusiness.com')
 
 
 def _can_manage(business, user):
@@ -92,11 +96,15 @@ def _validate_minyan(body):
 
 
 @minyan_api.route('/businesses/<int:business_id>/minyanim', methods=['GET'])
-def list_minyanim(business_id):
+@token_optional
+def list_minyanim(current_user, business_id):
     business = db.session.get(Business, business_id)
     if not business:
         return jsonify({'message': 'Business not found'}), 404
-    rows = Minyan.query.filter_by(business_id=business_id).order_by(Minyan.tefilah, Minyan.fixed_time).all()
+    query = Minyan.query.filter_by(business_id=business_id)
+    if not _can_manage(business, current_user):
+        query = query.filter(Minyan.approved_to_publish.is_(True))
+    rows = query.order_by(Minyan.tefilah, Minyan.fixed_time).all()
     return jsonify({'results': MinyanSchema(many=True).dump(rows), 'disclaimer': DISCLAIMER})
 
 
@@ -113,10 +121,126 @@ def add_minyan(current_user, business_id):
     if error:
         return error, 400
 
-    minyan = Minyan(business_id=business_id, created_by=current_user.public_id, **fields)
+    minyan = Minyan(business_id=business_id, created_by=current_user.public_id,
+                     approved_to_publish=True, **fields)
     db.session.add(minyan)
     db.session.commit()
     return jsonify(MinyanSchema().dump(minyan)), 201
+
+
+@minyan_api.route('/businesses/<int:business_id>/minyanim/guest', methods=['POST'])
+def create_guest_minyan(business_id):
+    """Same validation as add_minyan (the mandatory source_name quality gate
+    included) minus the login/ownership requirement -- lands pending
+    (approved_to_publish=None) instead of visible immediately."""
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({'message': 'Business not found'}), 404
+
+    error, fields = _validate_minyan(request.get_json() or {})
+    if error:
+        return error, 400
+
+    body = request.get_json() or {}
+    guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (body.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    import secrets
+    minyan = Minyan(
+        business_id=business_id, created_by=None, approved_to_publish=None,
+        guest_email=guest_email or None, guest_phone=guest_phone or None,
+        guest_manage_token=secrets.token_urlsafe(32), **fields,
+    )
+    db.session.add(minyan)
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            emails.send_guest_submission_email(
+                guest_email, 'your minyan time suggestion', f'{business.name} -- {minyan.tefilah}',
+                f'{BUSINESS_SITE_URL}/guest/minyan/{minyan.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    data = MinyanSchema().dump(minyan)
+    data['guest_manage_token'] = minyan.guest_manage_token
+    return jsonify(data), 201
+
+
+@minyan_api.route('/minyanim/guest/<token>', methods=['GET'])
+def get_guest_minyan(token):
+    minyan = Minyan.query.filter_by(guest_manage_token=token).first()
+    if not minyan:
+        return jsonify({'message': 'Minyan not found'}), 404
+    return jsonify(MinyanSchema().dump(minyan))
+
+
+@minyan_api.route('/minyanim/guest/<token>', methods=['PATCH'])
+def edit_guest_minyan(token):
+    minyan = Minyan.query.filter_by(guest_manage_token=token).first()
+    if not minyan:
+        return jsonify({'message': 'Minyan not found'}), 404
+
+    body = request.get_json() or {}
+    merged = {
+        'tefilah': body.get('tefilah', minyan.tefilah),
+        'label': body.get('label', minyan.label),
+        'days': body.get('days', minyan.days),
+        'season': body.get('season', minyan.season),
+        'fixed_time': body.get('fixed_time', minyan.fixed_time.strftime('%H:%M') if minyan.fixed_time else None),
+        'relative_anchor': body.get('relative_anchor', minyan.relative_anchor),
+        'relative_offset_minutes': body.get('relative_offset_minutes', minyan.relative_offset_minutes),
+        'notes': body.get('notes', minyan.notes),
+        'source_name': body.get('source_name', minyan.source_name),
+        'source_url': body.get('source_url', minyan.source_url),
+    }
+    error, fields = _validate_minyan(merged)
+    if error:
+        return error, 400
+
+    for key, value in fields.items():
+        setattr(minyan, key, value)
+    minyan.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(MinyanSchema().dump(minyan))
+
+
+@minyan_api.route('/minyanim/guest/<token>', methods=['DELETE'])
+def delete_guest_minyan(token):
+    minyan = Minyan.query.filter_by(guest_manage_token=token).first()
+    if not minyan:
+        return jsonify({'message': 'Minyan not found'}), 404
+    db.session.delete(minyan)
+    db.session.commit()
+    return jsonify({'message': 'Minyan deleted'})
+
+
+@minyan_api.route('/admin/minyanim/pending', methods=['GET'])
+@admin_required
+def get_pending_minyanim(_current_user):
+    pending = Minyan.query.filter_by(approved_to_publish=None).order_by(Minyan.pub_date.asc()).all()
+    return jsonify(MinyanSchema(many=True).dump(pending))
+
+
+@minyan_api.route('/admin/minyanim/<int:minyan_id>/approve', methods=['POST'])
+@admin_required
+def approve_minyan(_current_user, minyan_id):
+    minyan = db.session.get(Minyan, minyan_id)
+    if not minyan:
+        return jsonify({'message': 'Minyan not found'}), 404
+    body = request.get_json(silent=True) or {}
+    approved = not body.get('reject', False)
+    minyan.approved_to_publish = approved
+    db.session.commit()
+    return jsonify({'message': 'approved' if approved else 'rejected'})
 
 
 @minyan_api.route('/minyanim/<int:minyan_id>', methods=['PATCH'])
@@ -183,7 +307,7 @@ def search_minyanim(current_user):
 
     query = (Minyan.query
         .join(Business, Business.id == Minyan.business_id)
-        .filter(Business.category == 'shul'))
+        .filter(Business.category == 'shul', Minyan.approved_to_publish.is_(True)))
     if city:
         loc_ids = db.session.query(BusinessLocation.business_id).filter(BusinessLocation.city.ilike(f'%{city}%'))
         query = query.filter(Business.id.in_(loc_ids))

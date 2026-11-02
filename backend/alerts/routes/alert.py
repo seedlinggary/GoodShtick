@@ -425,6 +425,7 @@ def _detected_move_for_user(user, now):
     loc_ids = (db.session.query(BusinessLocation.business_id)
                .filter(BusinessLocation.city.ilike(f'%{target_city}%')))
     biz_q = (Business.query
+             .filter(Business.approved_to_publish.is_(True))
              .filter(Business.category.in_(('grocery', 'shul', 'mikvah')))
              .filter(Business.id.in_(loc_ids)))
     businesses = biz_q.order_by(Business.rating_avg.desc()).limit(5).all()

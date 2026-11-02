@@ -7,7 +7,7 @@ from sqlalchemy import func, case
 from sqlalchemy.orm import selectinload
 
 from config import db
-from security import token_required, token_optional
+from security import token_required, token_optional, admin_required
 from upload import upload_file
 from backend.estates.modals.estates import (
     EstatesListing, EstatesListingPhoto, EstatesListingLike,
@@ -31,6 +31,7 @@ ADDRESS_MAX = 300
 CONTACT_NAME_MAX = 150
 EMAIL_MAX = 150
 PHONE_MAX = 40
+CONTACT_LINK_MAX = 500
 
 
 def _feed_options():
@@ -69,6 +70,7 @@ def _add_price_context(listing):
                            EstatesListing.bedrooms == listing.bedrooms,
                            EstatesListing.price.isnot(None),
                            area_filter,
+                           EstatesListing.approved_to_publish.is_(True),
                            db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)))
     if comparables.count() < MIN_COMPARABLES:
         return
@@ -187,16 +189,25 @@ def _validate_listing_body(body, partial=False, existing=None):
                 return jsonify({'message': f'{key} is too long'}), None
             fields[key] = val or None
 
+    if 'contact_link' in body:
+        val = (body.get('contact_link') or '').strip()
+        if len(val) > CONTACT_LINK_MAX:
+            return jsonify({'message': 'contact_link is too long'}), None
+        fields['contact_link'] = val or None
+
     # At least one direct way to reach the poster -- the one hard
-    # requirement the user called out explicitly. For a PATCH, a key left
-    # out of the body means "unchanged", so fall back to the existing
-    # listing's current value rather than treating it as cleared --
-    # otherwise a PATCH clearing the one contact method a listing has would
-    # silently leave it with none.
+    # requirement the user called out explicitly. contact_link counts as a
+    # standalone valid method (e.g. a listing imported from another site
+    # that wants to be reached through its own page/form, not directly).
+    # For a PATCH, a key left out of the body means "unchanged", so fall
+    # back to the existing listing's current value rather than treating it
+    # as cleared -- otherwise a PATCH clearing the one contact method a
+    # listing has would silently leave it with none.
     email = fields['contact_email'] if 'contact_email' in fields else (existing.contact_email if existing else None)
     phone = fields['contact_phone'] if 'contact_phone' in fields else (existing.contact_phone if existing else None)
-    if not (email or phone):
-        return jsonify({'message': 'At least one of contact_email or contact_phone is required'}), None
+    link = fields['contact_link'] if 'contact_link' in fields else (existing.contact_link if existing else None)
+    if not (email or phone or link):
+        return jsonify({'message': 'At least one of contact_email, contact_phone, or contact_link is required'}), None
 
     if 'attributes' in body:
         attributes = body.get('attributes')
@@ -239,20 +250,19 @@ def list_listing_types():
 @estates_api.route('/stats', methods=['GET'])
 def estates_stats():
     now = datetime.utcnow()
-    active = EstatesListing.query.filter(
-        db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+    not_expired = db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)
+    approved = EstatesListing.approved_to_publish.is_(True)
+    active = EstatesListing.query.filter(not_expired, approved)
     total = active.count()
     total_cities = (db.session.query(func.count(func.distinct(func.lower(EstatesListing.city))))
-                     .filter(EstatesListing.city.isnot(None), EstatesListing.city != '',
-                             db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+                     .filter(EstatesListing.city.isnot(None), EstatesListing.city != '', not_expired, approved)
                      .scalar() or 0)
     total_countries = (db.session.query(func.count(func.distinct(func.lower(EstatesListing.country))))
-                        .filter(EstatesListing.country.isnot(None), EstatesListing.country != '',
-                                db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+                        .filter(EstatesListing.country.isnot(None), EstatesListing.country != '', not_expired, approved)
                         .scalar() or 0)
     by_type = dict(
         db.session.query(EstatesListing.listing_type, func.count(EstatesListing.id))
-        .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+        .filter(not_expired, approved)
         .group_by(EstatesListing.listing_type).all()
     )
     return jsonify({
@@ -271,6 +281,7 @@ def list_neighborhoods():
     now = datetime.utcnow()
     rows = (db.session.query(EstatesListing.neighborhood)
             .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+            .filter(EstatesListing.approved_to_publish.is_(True))
             .filter(EstatesListing.neighborhood.isnot(None), EstatesListing.neighborhood != '')
             .distinct()
             .all())
@@ -287,7 +298,10 @@ def _resolve_area(area_slug):
     first since it's the more specific of the two (see /estates/listings'
     own city-also-matches-neighborhood comment)."""
     now = datetime.utcnow()
-    active = db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)
+    active = db.and_(
+        db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now),
+        EstatesListing.approved_to_publish.is_(True),
+    )
     neighborhoods = (db.session.query(EstatesListing.neighborhood)
                       .filter(EstatesListing.neighborhood.isnot(None), EstatesListing.neighborhood != '', active)
                       .distinct().all())
@@ -310,7 +324,10 @@ def list_areas():
     sitemap (good-shtick/api/sitemap.js) and could seed an areas index page
     later. Cheap: grouped counts, not a full listing scan."""
     now = datetime.utcnow()
-    active = db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)
+    active = db.and_(
+        db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now),
+        EstatesListing.approved_to_publish.is_(True),
+    )
     neighborhood_counts = dict(
         db.session.query(EstatesListing.neighborhood, func.count(EstatesListing.id))
         .filter(EstatesListing.neighborhood.isnot(None), EstatesListing.neighborhood != '', active)
@@ -342,7 +359,11 @@ def area_page(area_slug):
 
     now = datetime.utcnow()
     col = EstatesListing.neighborhood if field == 'neighborhood' else EstatesListing.city
-    base_filter = db.and_(col == name, db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+    base_filter = db.and_(
+        col == name,
+        db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now),
+        EstatesListing.approved_to_publish.is_(True),
+    )
 
     count = EstatesListing.query.filter(base_filter).count()
     by_type = dict(
@@ -478,7 +499,12 @@ def list_listings(current_user):
 
     now = datetime.utcnow()
     query = EstatesListing.query.options(*_feed_options()).filter(
-        db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
+        db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now),
+        # A guest-submitted listing lands at approved_to_publish=None
+        # (pending) -- create_listing explicitly sets True for every
+        # logged-in user's own listing, so this never affects existing
+        # behavior, only hides a not-yet-reviewed guest submission.
+        EstatesListing.approved_to_publish.is_(True))
     try:
         query = _apply_listing_filters(query, request.args)
     except FilterError as e:
@@ -551,6 +577,11 @@ def get_listing(current_user, identifier):
     listing = query.filter_by(id=int(identifier)).first() if identifier.isdigit() else query.filter_by(slug=identifier).first()
     if not listing:
         return jsonify({'message': 'Listing not found'}), 404
+    # A pending guest submission isn't reachable here even by direct
+    # id/slug -- a guest previews/manages their own via the separate
+    # /listings/guest/<token> route instead, which doesn't need this gate.
+    if listing.approved_to_publish is not True and not _can_manage(listing, current_user):
+        return jsonify({'message': 'Listing not found'}), 404
     listing.views_count = (listing.views_count or 0) + 1
     db.session.commit()
     _add_price_context(listing)
@@ -565,7 +596,7 @@ def get_listing_seo(identifier):
     genuine visits."""
     query = EstatesListing.query.options(*_feed_options())
     listing = query.filter_by(id=int(identifier)).first() if identifier.isdigit() else query.filter_by(slug=identifier).first()
-    if not listing:
+    if not listing or listing.approved_to_publish is not True:
         return jsonify({'message': 'Listing not found'}), 404
     return jsonify(EstatesListingCardSchema().dump(listing))
 
@@ -599,7 +630,9 @@ def _listing_draft_system_prompt():
         "- contact_name: a name if one is given, else null.\n"
         "- contact_phone: a phone number if one is given (as written), else null.\n"
         "- contact_whatsapp: a WhatsApp number if explicitly distinguished from a phone number, else null.\n"
-        "- contact_email: an email if one is given, else null.\n\n"
+        "- contact_email: an email if one is given, else null.\n"
+        "- contact_link: a URL if the post says to view/contact via a link (e.g. a listing page on "
+        "another site), else null.\n\n"
         "Never invent information that isn't in the text -- use null/empty for anything not actually stated. "
         "Do not wrap the JSON in markdown fences. Return valid JSON only."
     )
@@ -670,6 +703,7 @@ def create_listing(current_user):
     listing = EstatesListing(
         slug=_unique_slug(fields['title']),
         created_by=current_user.public_id,
+        approved_to_publish=True,
         **fields,
     )
     db.session.add(listing)
@@ -681,6 +715,169 @@ def create_listing(current_user):
 
     db.session.commit()
     return jsonify(make_listing_schema(current_user).dump(listing)), 201
+
+
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
+
+
+# ── Guest (no-account) listing routes ───────────────────────────────────────
+# "Post without an account" -- anyone can submit a listing with just an
+# email or phone; it lands pending (approved_to_publish=None, excluded from
+# list_listings/get_listing above) until approved, and the guest manages it
+# afterward via a private emailed magic link (guest_manage_token) -- same
+# token-lookup-is-the-auth shape as still_available_token elsewhere in this
+# file.
+@estates_api.route('/listings/guest', methods=['POST'])
+def create_guest_listing():
+    body = request.get_json() or {}
+    error, fields = _validate_listing_body(body, partial=False)
+    if error:
+        return error, 400
+
+    photos = body.get('photos')
+    if photos is not None and (not isinstance(photos, list) or len(photos) > MAX_PHOTOS):
+        return jsonify({'message': f'photos must be a list of at most {MAX_PHOTOS} filenames'}), 400
+
+    guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (body.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    import secrets
+    listing = EstatesListing(
+        slug=_unique_slug(fields['title']),
+        created_by=None,
+        approved_to_publish=None,
+        guest_email=guest_email or None,
+        guest_phone=guest_phone or None,
+        guest_manage_token=secrets.token_urlsafe(32),
+        **fields,
+    )
+    db.session.add(listing)
+    db.session.flush()
+
+    for i, filename in enumerate((photos or [])[:MAX_PHOTOS]):
+        if filename:
+            db.session.add(EstatesListingPhoto(listing_id=listing.id, filename=filename, position=i))
+
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            emails.send_guest_submission_email(
+                guest_email, 'your Estates listing', listing.title,
+                f'{ESTATES_SITE_URL}/guest/estates/{listing.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    data = make_listing_schema(None).dump(listing)
+    data['guest_manage_token'] = listing.guest_manage_token
+    return jsonify(data), 201
+
+
+@estates_api.route('/listings/guest/<token>', methods=['GET'])
+def get_guest_listing(token):
+    listing = EstatesListing.query.options(*_feed_options()).filter_by(guest_manage_token=token).first()
+    if not listing:
+        return jsonify({'message': 'Listing not found'}), 404
+    return jsonify(make_listing_schema(None).dump(listing))
+
+
+@estates_api.route('/listings/guest/<token>', methods=['PATCH'])
+def edit_guest_listing(token):
+    listing = EstatesListing.query.filter_by(guest_manage_token=token).first()
+    if not listing:
+        return jsonify({'message': 'Listing not found'}), 404
+
+    body = request.get_json() or {}
+    error, fields = _validate_listing_body(body, partial=True, existing=listing)
+    if error:
+        return error, 400
+
+    type_changing_to = fields.get('listing_type', listing.listing_type)
+    for key, value in fields.items():
+        setattr(listing, key, value)
+
+    if 'listing_type' in fields:
+        if type_changing_to in EXPIRING_LISTING_TYPES and listing.expires_at is None:
+            listing.renew()
+        elif type_changing_to not in EXPIRING_LISTING_TYPES:
+            listing.expires_at = None
+
+    if 'photos' in body:
+        error_resp = _apply_photos(listing, body.get('photos'))
+        if error_resp:
+            return error_resp
+
+    db.session.commit()
+    return jsonify(make_listing_schema(None).dump(listing))
+
+
+@estates_api.route('/listings/guest/<token>', methods=['DELETE'])
+def delete_guest_listing(token):
+    listing = EstatesListing.query.filter_by(guest_manage_token=token).first()
+    if not listing:
+        return jsonify({'message': 'Listing not found'}), 404
+    db.session.delete(listing)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'})
+
+
+@estates_api.route('/listings/guest/<token>/renew', methods=['POST'])
+def renew_guest_listing(token):
+    listing = EstatesListing.query.filter_by(guest_manage_token=token).first()
+    if not listing:
+        return jsonify({'message': 'Listing not found'}), 404
+    if listing.listing_type not in EXPIRING_LISTING_TYPES:
+        return jsonify({'message': 'Only sale/long-term listings expire, so there is nothing to renew'}), 400
+    listing.renew()
+    db.session.commit()
+    return jsonify(make_listing_schema(None).dump(listing))
+
+
+@estates_api.route('/listings/guest/<token>/status', methods=['PATCH'])
+def set_guest_listing_status(token):
+    listing = EstatesListing.query.filter_by(guest_manage_token=token).first()
+    if not listing:
+        return jsonify({'message': 'Listing not found'}), 404
+    body = request.get_json(silent=True) or {}
+    status = body.get('status')
+    if status not in LISTING_STATUSES:
+        return jsonify({'message': f'status must be one of: {", ".join(LISTING_STATUSES)}'}), 400
+    listing.status = status
+    if status != 'active':
+        listing.expires_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(make_listing_schema(None).dump(listing))
+
+
+@estates_api.route('/admin/listings/pending', methods=['GET'])
+@admin_required
+def get_pending_listings(_current_user):
+    pending = (EstatesListing.query.options(*_feed_options())
+               .filter_by(approved_to_publish=None)
+               .order_by(EstatesListing.pub_date.asc()).all())
+    return jsonify(make_listing_schema(None, many=True).dump(pending))
+
+
+@estates_api.route('/admin/listings/<int:listing_id>/approve', methods=['POST'])
+@admin_required
+def approve_listing(_current_user, listing_id):
+    listing = db.session.get(EstatesListing, listing_id)
+    if not listing:
+        return jsonify({'message': 'Listing not found'}), 404
+    body = request.get_json(silent=True) or {}
+    approved = not body.get('reject', False)
+    listing.approved_to_publish = approved
+    db.session.commit()
+    return jsonify({'message': 'approved' if approved else 'rejected'})
 
 
 @estates_api.route('/listings/<int:listing_id>', methods=['PATCH'])
@@ -932,6 +1129,9 @@ def check_still_available():
                   .filter(EstatesListing.status == 'active')
                   .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
                   .filter(EstatesListing.still_available_confirmed_at.is_(None))
+                  # A still-pending guest submission shouldn't get a "still
+                  # available?" reminder before it's even been approved once.
+                  .filter(EstatesListing.approved_to_publish.is_(True))
                   .all())
 
     import secrets

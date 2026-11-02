@@ -48,7 +48,7 @@ def search_business(q=None, category=None, city=None, kashrut_only=False, open_n
         by_id = {b.id: b for b in rows}
         ordered = [by_id[i['id']] for i in items if i['id'] in by_id]
     else:
-        query = Business.query
+        query = Business.query.filter(Business.approved_to_publish.is_(True))
         if category:
             query = query.filter(Business.category == category)
         ordered = query.order_by(Business.rating_avg.desc().nullslast()).limit(limit * 4).all()
@@ -92,6 +92,7 @@ def search_estates(q=None, listing_type=None, city=None, min_price=None, max_pri
         ordered = [by_id[i['id']] for i in items if i['id'] in by_id]
     else:
         query = EstatesListing.query.filter(
+            EstatesListing.approved_to_publish.is_(True),
             db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
         if listing_type:
             query = query.filter(EstatesListing.listing_type == listing_type)
@@ -161,7 +162,8 @@ def search_minyanim(city=None, tefilah=None, limit=TOOL_RESULT_LIMIT):
     backend/business/routes/minyan.py's own search_minyanim view (that one
     can't be called directly -- it reads request.args itself -- so the same
     filter logic is rebuilt here against the same models)."""
-    query = Minyan.query.join(Business, Business.id == Minyan.business_id).filter(Business.category == 'shul')
+    query = (Minyan.query.join(Business, Business.id == Minyan.business_id)
+             .filter(Business.category == 'shul', Minyan.approved_to_publish.is_(True)))
     if city:
         loc_ids = db.session.query(BusinessLocation.business_id).filter(BusinessLocation.city.ilike(f'%{city}%'))
         query = query.filter(Business.id.in_(loc_ids))

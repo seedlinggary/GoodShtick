@@ -40,7 +40,9 @@ def business_insights(current_user, business_id):
     if not business or not _can_manage(business, current_user):
         return jsonify({'message': 'Not authorized'}), 403
 
-    peers = Business.query.filter(Business.category == business.category, Business.id != business.id)
+    peers = Business.query.filter(
+        Business.category == business.category, Business.id != business.id,
+        Business.approved_to_publish.is_(True))
     peer_count = peers.count()
     avg_rating = peers.with_entities(func.avg(Business.rating_avg)).scalar() or 0.0
     logo_pct = 0.0

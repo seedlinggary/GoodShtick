@@ -70,6 +70,7 @@ def _fetch_tachlis(q, cap, profile=None):
 def _fetch_estates_listings(q, cap, profile=None):
     now = datetime.utcnow()
     query = (EstatesListing.query.options(selectinload(EstatesListing.photos))
+             .filter(EstatesListing.approved_to_publish.is_(True))
              .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now)))
     if q:
         like = f'%{q}%'
@@ -96,7 +97,7 @@ def _fetch_estates_listings(q, cap, profile=None):
 
 
 def _fetch_business_new(q, cap, profile=None):
-    query = Business.query
+    query = Business.query.filter(Business.approved_to_publish.is_(True))
     if q:
         like = f'%{q}%'
         query = query.filter(db.or_(Business.name.ilike(like), Business.about.ilike(like)))
@@ -305,6 +306,7 @@ def today():
 
     estates_rows = (EstatesListing.query
                      .options(selectinload(EstatesListing.photos))
+                     .filter(EstatesListing.approved_to_publish.is_(True))
                      .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
                      .filter(_is_today(EstatesListing))
                      .order_by(db.func.coalesce(EstatesListing.source_posted_at, EstatesListing.pub_date).desc())

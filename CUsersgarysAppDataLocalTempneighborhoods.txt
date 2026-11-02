@@ -1,0 +1,122 @@
+=== Beit Shemesh (105 distinct) ===
+    80  Neve Shamir (Ramah Hey)
+    67  RBS Aleph
+    41  Mevaseret Zion (not stated)
+    28  RBS Gimmel
+    18  RBS Daled
+     9  RBS Gimmel 1
+     9  Beit Shemesh (not stated)
+     9  Mishkafayim
+     8  Kiryat Menachem
+     7  Malha
+     7  Ein Kerem
+     6  Nofei HaSela
+     5  Givat Masua
+     4  Har Adar (not stated)
+     4  Motza Illit
+     4  Rechess Halilim
+     3  Ein Hemed
+     3  Malcha
+     3  RBS (not stated)
+     3  Sheinfeld
+     3  RBS Gimmel 2
+     3  Sansan
+     3  Moshav Shoeva (not stated)
+     2  Ramat Avraham
+     2  Ramat Beit Shemesh Alef
+     2  Shoresh (not stated)
+     2  Elazar (not stated)
+     2  HaMigrasha
+     2  Kiryat Yovel
+     2  Ramat Sharett
+     2  Old Mevaseret Zion
+     2  Ramat Shilo
+     2  Kiryat HaYovel
+     2  Even Sapir (not stated)
+     2  Ramatayim
+     2  Nofei HaChoresh
+     2  Maoz Zion
+     2  Har Gilo (not stated)
+     2  Har Nof
+     2  Ir Ganim
+     2  Beit Shemesh (Ramat Beit Shemesh) (not stated)
+     2  Sde Bar (not stated)
+     1  Givat Ye'arim (not stated)
+     1  Arza
+     1  Rechis Halilim (Mevaseret Zion)
+     1  Castel (not stated)
+     1  Givat Yearim (not stated)
+     1  Nes Harim (not stated)
+     1  Gefen
+     1  Nof Harim
+     1  Givon HaChadasha
+     1  Bosem (Mevaseret Zion)
+     1  Tzur Hadassah (not stated)
+     1  Abu Ghosh (not stated)
+     1  Even Sapir
+     1  HaTeena
+     1  Moshav Aminadav
+     1  Old Har Adar
+     1  Harav Kook (RBS Aleph)
+     1  Shchuna Dalet
+=== Jerusalem (267 distinct) ===
+   113  Jerusalem (not stated)
+   109  City Center
+    76  Ramat Eshkol
+    68  Arnona
+    54  Nachlaot
+    48  Gilo
+    44  Pisgat Ze'ev
+    41  Mevaseret Zion (not stated)
+    34  Maale Adumim (not stated)
+    32  Kiryat HaYovel
+    28  Romema
+    28  Har Homa
+    27  Rehavia
+    24  French Hill
+    23  Beit HaKerem
+    22  Armon HaNatziv
+    21  Old Katamon
+    20  Baka
+    16  Machal / Arzei HaBira
+    16  Makor Baruch
+    14  German Colony
+    13  Talbiyeh
+    12  Abu Tor
+    12  Malha
+    12  Talpiot
+    12  Katamonim
+    12  Maalot Dafna
+    11  Givat HaMivtar
+    11  Mahane Yehuda
+     9  Kiryat Menachem
+     9  Shaarei Chesed
+     8  Givat Masua
+     7  Mishkenot HaUma
+     7  Ein Kerem
+     7  Holyland
+     7  Mamilla
+     6  Nofei HaSela
+     6  Katamon
+     6  Malcha
+     5  Musrara
+     5  Ramat Sharett
+     5  Ramat Danya
+     5  Rechess Halilim
+     5  Ramot Aleph
+     5  Machane Yehuda
+     5  Kiryat Yovel
+     5  Kiryat Moshe
+     5  Makor Chaim
+     4  Pat
+     4  Armon HaNetziv
+     4  Neve Yaakov
+     4  Motza Illit
+     4  Har Adar (not stated)
+     4  Sanhedria
+     3  Ramat Motza
+     3  Ein Hemed
+     3  Ir Ganim
+     3  Sansan
+     3  Kidar (not stated)
+     3  Moshav Shoeva (not stated)

@@ -85,6 +85,11 @@ class EstatesListing(db.Model):
     contact_email = db.Column(db.String(150), nullable=True)
     contact_phone = db.Column(db.String(40), nullable=True)
     contact_whatsapp = db.Column(db.String(40), nullable=True)
+    # A link in place of (or alongside) email/phone/WhatsApp -- for listings
+    # sourced from another site that wants to be contacted through its own
+    # listing page/form rather than directly, e.g. a bulk-imported listing.
+    # Counts as a valid standalone contact method (see _validate_listing_body).
+    contact_link = db.Column(db.String(500), nullable=True)
 
     # Free-form extensibility (parking, furnished, pets_ok, year_built, ...)
     # without needing a migration for every niche field -- same pattern as
@@ -119,6 +124,22 @@ class EstatesListing(db.Model):
     still_available_confirmed_at = db.Column(db.DateTime, nullable=True)
     still_available_reminder_sent_at = db.Column(db.DateTime, nullable=True)
     still_available_token = db.Column(db.String(64), nullable=True, unique=True)
+
+    # Guest posting: filled only when this listing was submitted without an
+    # account (see routes/estates.py's guest block). guest_manage_token is
+    # the no-login credential: a private link emailed to the submitter,
+    # validated purely by this unique token -- same mechanism as
+    # still_available_token above, just for managing the listing itself.
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
+
+    # Three-state moderation gate: None = pending guest submission awaiting
+    # admin review, True = live, False = rejected. Every existing row was
+    # backfilled to True by the migration that added this column, and every
+    # logged-in create path sets it True immediately -- only a brand new
+    # guest submission is ever inserted with this left None.
+    approved_to_publish = db.Column(db.Boolean, nullable=True, index=True)
 
     photos = db.relationship('EstatesListingPhoto', backref='listing', lazy=True,
                               cascade='all, delete-orphan', order_by='EstatesListingPhoto.position')
@@ -259,6 +280,21 @@ class EstatesGroupBuy(db.Model):
     created_by = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=True, index=True)
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     is_closed = db.Column(db.Boolean, nullable=False, default=False, server_default='false')
+
+    # Guest posting: filled only when this group buy was submitted without
+    # an account (see routes/estates_group_buy.py's guest block).
+    # guest_manage_token is the no-login credential: a private link emailed
+    # to the submitter, validated purely by this unique token.
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
+
+    # Three-state moderation gate: None = pending guest submission awaiting
+    # admin review, True = live, False = rejected. Every existing row was
+    # backfilled to True by the migration that added this column, and every
+    # logged-in create path sets it True immediately -- only a brand new
+    # guest submission is ever inserted with this left None.
+    approved_to_publish = db.Column(db.Boolean, nullable=True, index=True)
 
     photos = db.relationship('EstatesGroupBuyPhoto', backref='group_buy', lazy=True,
                               cascade='all, delete-orphan', order_by='EstatesGroupBuyPhoto.position')

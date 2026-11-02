@@ -74,6 +74,21 @@ class Business(db.Model):
 
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
+    # Guest posting: filled only when this business was submitted without an
+    # account (see routes/business.py's guest block). guest_manage_token is
+    # the no-login credential: a private link emailed to the submitter,
+    # validated purely by this unique token.
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
+
+    # Three-state moderation gate: None = pending guest submission awaiting
+    # admin review, True = live, False = rejected. Every existing row was
+    # backfilled to True by the migration that added this column, and every
+    # logged-in create path sets it True immediately -- only a brand new
+    # guest submission is ever inserted with this left None.
+    approved_to_publish = db.Column(db.Boolean, nullable=True, index=True)
+
     owner = db.relationship('User', foreign_keys=[owner_user_id],
                              backref=db.backref('owned_businesses', lazy=True))
     creator = db.relationship('User', foreign_keys=[created_by],
@@ -83,7 +98,9 @@ class Business(db.Model):
 
     def __init__(self, slug, name, category, about=None, logo=None,
                  created_by=None, attributes=None, website=None,
-                 source_url=None, source_name=None, imported=False):
+                 source_url=None, source_name=None, imported=False,
+                 approved_to_publish=True, guest_email=None, guest_phone=None,
+                 guest_manage_token=None):
         self.slug = slug
         self.name = name
         self.category = category
@@ -95,6 +112,10 @@ class Business(db.Model):
         self.source_url = source_url
         self.source_name = source_name
         self.imported = imported
+        self.approved_to_publish = approved_to_publish
+        self.guest_email = guest_email
+        self.guest_phone = guest_phone
+        self.guest_manage_token = guest_manage_token
 
     @property
     def is_claimed(self):

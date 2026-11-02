@@ -24,7 +24,12 @@ from backend.user.schemas.audit_log import audit_logs_schema
 from backend.user.modals.login_log import LoginLog
 from backend.user.schemas.login_log import login_logs_schema
 from backend.business.modals.business import Business
-from backend.estates.modals.estates import EstatesListing
+from backend.business.modals.business_comment import BusinessComment
+from backend.business.modals.community import Community
+from backend.business.modals.minyan import Minyan
+from backend.estates.modals.estates import EstatesListing, EstatesGroupBuy
+from backend.marketplace.modals.marketplace import MarketplaceListing
+from backend.news.modals.news import NewsArticle
 from backend.torah.modals.torah import TorahPost
 from backend.ads.modals.ad import Ad
 
@@ -319,7 +324,16 @@ def platform_stats(_current_user):
     approved_shticks = Shtick.query.filter_by(approved_to_publish=True).count()
     total_comments = Comment.query.count()
     total_likes = Like.query.count()
-    total_games = GameScore.query.count()
+    # Excludes admin/super_admin accounts' own play -- same reasoning as
+    # the Analytics tab's visitor-count staff exclusion: an admin testing a
+    # game (including on localhost, which has no equivalent concept for
+    # GameScore rows) shouldn't inflate a number meant to reflect real
+    # member engagement.
+    staff_ids = {u.public_id for u in User.query.filter(User.role.in_(('admin', 'super_admin'))).all()}
+    games_query = GameScore.query
+    if staff_ids:
+        games_query = games_query.filter(~GameScore.user_id.in_(staff_ids))
+    total_games = games_query.count()
     return jsonify({
         'users': total_users,
         'shticks': {'total': total_shticks, 'pending': pending_shticks, 'approved': approved_shticks},
@@ -348,6 +362,93 @@ def approval_history(_current_user):
              .filter(Shtick.approved_by.isnot(None)))
     rows, total = _paginate(query.order_by(Shtick.pub_date.desc()), page)
     return jsonify({'items': shticks_schema.dump(rows), **_page_meta(page, total)})
+
+
+@admin_api.route('/guest-submissions', methods=['GET'])
+@admin_required
+def get_guest_submissions(_current_user):
+    """One inbox aggregating every content type's PENDING GUEST (no-account)
+    submission across the whole network -- distinct from each type's own
+    existing pending queue, which for Tachlis/Shtick/News also mixes in
+    pending submissions from logged-in members. Filtering on
+    `guest_manage_token IS NOT NULL` (on top of the shared
+    approved_to_publish IS NULL pending state every domain already uses)
+    is what isolates true guest rows here.
+
+    Each row carries the exact approve/reject action to take, since
+    different domains settled on two different existing shapes rather than
+    one being retrofitted here: `action_style: 'reject_flag'` POSTs
+    `approve_body`/`reject_body` to the SAME `approve_url`
+    (Tachlis/Shtick/Estates/Business/Marketplace/Community/Group Buy/
+    Minyan); `action_style: 'separate_endpoints'` POSTs no body to
+    `approve_url` or `reject_url` respectively (News/the 3 comment types)."""
+    results = []
+
+    def add(rows, content_type, title_fn, **action):
+        for r in rows:
+            results.append({
+                'content_type': content_type,
+                'id': r.id,
+                'title': title_fn(r),
+                'guest_email': r.guest_email,
+                'guest_phone': r.guest_phone,
+                'submitted_at': r.pub_date.isoformat() if r.pub_date else None,
+                **action,
+            })
+
+    def reject_flag_action(approve_url):
+        return {
+            'action_style': 'reject_flag',
+            'approve_url': approve_url, 'approve_body': {'reject': False},
+            'reject_url': approve_url, 'reject_body': {'reject': True},
+        }
+
+    def separate_endpoints_action(approve_url, reject_url):
+        return {
+            'action_style': 'separate_endpoints',
+            'approve_url': approve_url, 'approve_body': {},
+            'reject_url': reject_url, 'reject_body': {},
+        }
+
+    def pending_guest(model):
+        return model.query.filter(
+            model.guest_manage_token.isnot(None), model.approved_to_publish.is_(None)).all()
+
+    add(pending_guest(TachlisPost), 'tachlis_post', lambda r: r.title,
+        **reject_flag_action('/tachlis/admin/posts/{id}/approve'))
+    add(pending_guest(Shtick), 'shtick', lambda r: r.caption or 'Untitled',
+        **reject_flag_action('/admin/shtick/{id}/approve'))
+    add(pending_guest(EstatesListing), 'estates_listing', lambda r: r.title,
+        **reject_flag_action('/estates/admin/listings/{id}/approve'))
+    add(pending_guest(Business), 'business', lambda r: r.name,
+        **reject_flag_action('/business/admin/businesses/{id}/approve'))
+    add(pending_guest(MarketplaceListing), 'marketplace_listing', lambda r: r.title,
+        **reject_flag_action('/marketplace/admin/listings/{id}/approve'))
+    add(pending_guest(Community), 'community', lambda r: r.name,
+        **reject_flag_action('/business/admin/communities/{id}/approve'))
+    add(pending_guest(EstatesGroupBuy), 'estates_group_buy', lambda r: r.title,
+        **reject_flag_action('/estates/admin/group-buys/{id}/approve'))
+    add(pending_guest(Minyan), 'minyan', lambda r: f'{r.business.name} -- {r.tefilah}',
+        **reject_flag_action('/business/admin/minyanim/{id}/approve'))
+    add(pending_guest(NewsArticle), 'news_article', lambda r: r.title,
+        **separate_endpoints_action('/news/admin/articles/{id}/approve', '/news/admin/articles/{id}/reject'))
+    add(pending_guest(Comment), 'comment', lambda r: (r.text or '')[:80],
+        **separate_endpoints_action('/admin/comments/{id}/approve', '/admin/comments/{id}/unapprove'))
+    add(pending_guest(HockComment), 'hock_comment', lambda r: (r.text or '')[:80],
+        **separate_endpoints_action('/hock/admin/comments/{id}/approve', '/hock/admin/comments/{id}/unapprove'))
+    add(pending_guest(BusinessComment), 'business_comment', lambda r: (r.body or '')[:80],
+        **separate_endpoints_action('/business/admin/comments/{id}/approve', '/business/admin/comments/{id}/unapprove'))
+    add(pending_guest(HockPost), 'hock_post', lambda r: r.title,
+        **separate_endpoints_action('/hock/admin/posts/{id}/approve', '/hock/admin/posts/{id}/unapprove'))
+    add(pending_guest(TorahPost), 'torah_post', lambda r: r.title,
+        **reject_flag_action('/torah/admin/posts/{id}/approve'))
+
+    for row in results:
+        row['approve_url'] = row['approve_url'].format(id=row['id'])
+        row['reject_url'] = row['reject_url'].format(id=row['id'])
+
+    results.sort(key=lambda r: r['submitted_at'] or '')
+    return jsonify({'results': results, 'total': len(results)})
 
 
 @admin_api.route('/audit-log', methods=['GET'])

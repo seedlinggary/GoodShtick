@@ -141,14 +141,14 @@ def _search_hock(q, limit):
 
 
 def _search_business(q, limit):
-    """Business has no approval gate at all (every listing -- self-submitted
-    or bulk-imported -- is public immediately, see backend/business/routes/
-    business.py's list_businesses), so there's no visibility filter to apply
-    here beyond the match itself."""
+    """Business.approved_to_publish gates guest submissions pending review
+    (see backend/business/routes/business.py) -- every pre-existing row was
+    backfilled to True, so this excludes nothing that was already public."""
     vector = _vector(Business.name, Business.about)
     rank_expr = _rank(vector, q).label('rank')
     rows = (Business.query
             .add_columns(rank_expr)
+            .filter(Business.approved_to_publish.is_(True))
             .filter(_match(vector, q))
             .order_by(rank_expr.desc(), Business.pub_date.desc())
             .limit(limit)
@@ -164,17 +164,19 @@ def _search_business(q, limit):
 
 
 def _search_estates(q, limit):
-    """No approved_to_publish column on EstatesListing -- `expires_at`
-    is the one visibility gate (see EstatesListing.is_expired), and a
-    manually-marked 'rented'/'sold' status also sets expires_at to now
-    (routes/estates.py's set_listing_status), so filtering on expires_at
-    alone already excludes both expired AND rented/sold listings."""
+    """`expires_at` is still the main visibility gate -- a manually-marked
+    'rented'/'sold' status also sets expires_at to now (routes/estates.py's
+    set_listing_status), so filtering on expires_at alone already excludes
+    expired AND rented/sold listings. approved_to_publish is the newer,
+    separate gate for a pending guest submission awaiting admin review;
+    every pre-existing row was backfilled to True."""
     now = datetime.utcnow()
     vector = _vector(EstatesListing.title, EstatesListing.description,
                       EstatesListing.neighborhood, EstatesListing.city)
     rank_expr = _rank(vector, q).label('rank')
     rows = (EstatesListing.query
             .add_columns(rank_expr)
+            .filter(EstatesListing.approved_to_publish.is_(True))
             .filter(db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now))
             .filter(_match(vector, q))
             .order_by(rank_expr.desc(), EstatesListing.pub_date.desc())

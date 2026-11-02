@@ -54,6 +54,32 @@ def send_confirmation_email(alert, confirm_url):
     })
 
 
+def send_guest_submission_email(email, content_label, title, manage_url):
+    """Sent once, at guest-submission time, for any no-account post across
+    the site (a job, a listing, a business, a comment, ...) -- `content_label`
+    is a short human phrase like "your job post" or "your Estates listing",
+    kept generic/parameterized rather than one near-identical function per
+    content type. `manage_url` is the one-time private link (see
+    backend/guest/modals/guest_throttle.py's sibling token-generation
+    convention, duplicated per domain the same way still_available_token
+    already is) that lets the poster check status/edit/renew without ever
+    needing an account -- same "the link IS the credential" shape as
+    send_still_available_email's confirm_url below."""
+    resend, from_header = _client()
+    html = _wrap(
+        f'<p>Thanks for posting {escape(content_label)} -- <strong>{escape(title)}</strong>.</p>'
+        f'<p>It\'s in for review now; you\'ll see it go live once approved.</p>'
+        f'<p>{_button(manage_url, "Manage your post")}</p>'
+        f'<p style="color:#5b6b63;font-size:13px;">Keep this link -- it\'s the only way to edit, renew, or take down '
+        f'this post later, since no account was created. Didn\'t post this? Ignore this email.</p>'
+    )
+    resend.Emails.send({
+        'from': from_header, 'to': [email],
+        'subject': f'Your post is pending review: {title}',
+        'html': html,
+    })
+
+
 def send_digest_email(email, sections):
     """`sections`: [{alert, site_name, items: [{title, subtitle, url}], unsubscribe_url}, ...]
     -- one section per alert that found a new match, combined into ONE email

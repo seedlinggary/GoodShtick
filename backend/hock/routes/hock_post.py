@@ -1,3 +1,5 @@
+import os
+import secrets
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
@@ -17,6 +19,9 @@ hock_post_api = Blueprint('hock_post_api', __name__, url_prefix='/hock')
 
 PAGE_SIZE = 10
 TITLE_MAX = 200
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
+MAIN_SITE_URL = os.environ.get('MAIN_SITE_URL', 'https://www.gutshtick.com')
 
 
 def _feed_options():
@@ -153,6 +158,11 @@ def create_post(current_user):
         user_id=current_user.public_id,
         image=body.get('image') or None,
     )
+    # Explicit, even though the column already defaults to True -- matches
+    # every other domain's "a real member's create path always sets this
+    # itself" convention, so it can never silently change if the column
+    # default is ever touched.
+    post.approved_to_publish = True
     db.session.add(post)
     db.session.commit()
     schema = make_post_schema(current_user, many=False, card=True)
@@ -199,6 +209,113 @@ def delete_post(current_user, post_id):
     if post.user_id != current_user.public_id and not current_user.is_boss:
         return jsonify({'message': 'Not authorized'}), 403
     # Comments + likes cascade-delete via the model's cascade='all, delete-orphan'.
+    db.session.delete(post)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'})
+
+
+# ── Guest (no-account) post routes ──────────────────────────────────────────
+# "Post without an account" -- anyone can start a Hock thread with just an
+# email or phone; it lands pending (approved_to_publish=None, excluded from
+# list_posts/get_post above) until approved, and the guest manages it
+# afterward via a private emailed magic link (guest_manage_token) -- same
+# token-lookup-is-the-auth shape as every other domain's guest routes.
+
+@hock_post_api.route('/posts/guest', methods=['POST'])
+def create_guest_post():
+    body = request.get_json() or {}
+    title = (body.get('title') or '').strip()
+    text = (body.get('body') or '').strip()
+    if not title or not text:
+        return jsonify({'message': 'Title and body are required'}), 400
+    if len(title) > TITLE_MAX:
+        return jsonify({'message': f'Title must be {TITLE_MAX} characters or fewer'}), 400
+
+    guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (body.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    post = HockPost(
+        title=title,
+        body=text,
+        user_id=None,
+        image=None,  # /hock/upload is @token_required -- guests have no way to attach one
+        guest_email=guest_email or None,
+        guest_phone=guest_phone or None,
+        guest_manage_token=secrets.token_urlsafe(32),
+    )
+    # Force-pending no matter what -- a guest is never is_boss, so this can
+    # never take the auto-approve path, but set it explicitly anyway so this
+    # can never silently change if create_post's own logic is ever refactored.
+    post.approved_to_publish = None
+
+    db.session.add(post)
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            emails.send_guest_submission_email(
+                guest_email, 'your Hock post', post.title,
+                f'{MAIN_SITE_URL}/guest/hock/{post.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    schema = make_post_schema(None, many=False, card=True)
+    # guest_manage_token is never on the schema itself (would leak into any
+    # public/admin dump that reuses it) -- added back only on this one
+    # create response, which only the submitter ever sees.
+    data = schema.dump(post)
+    data['guest_manage_token'] = post.guest_manage_token
+    return jsonify(data), 201
+
+
+@hock_post_api.route('/posts/guest/<token>', methods=['GET'])
+def get_guest_post(token):
+    post = HockPost.query.filter_by(guest_manage_token=token).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+    schema = make_post_schema(None, many=False, card=False)
+    return jsonify(schema.dump(post))
+
+
+@hock_post_api.route('/posts/guest/<token>', methods=['PATCH'])
+def edit_guest_post(token):
+    post = HockPost.query.filter_by(guest_manage_token=token).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+
+    body = request.get_json() or {}
+    if 'title' in body:
+        new_title = (body.get('title') or '').strip()
+        if not new_title:
+            return jsonify({'message': 'Title cannot be empty'}), 400
+        if len(new_title) > TITLE_MAX:
+            return jsonify({'message': f'Title must be {TITLE_MAX} characters or fewer'}), 400
+        post.title = new_title
+    if 'body' in body:
+        new_body = (body.get('body') or '').strip()
+        if not new_body:
+            return jsonify({'message': 'Body cannot be empty'}), 400
+        post.body = new_body
+
+    post.edited_at = datetime.utcnow()
+    db.session.commit()
+    schema = make_post_schema(None, many=False, card=False)
+    return jsonify(schema.dump(post))
+
+
+@hock_post_api.route('/posts/guest/<token>', methods=['DELETE'])
+def delete_guest_post(token):
+    post = HockPost.query.filter_by(guest_manage_token=token).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
     db.session.delete(post)
     db.session.commit()
     return jsonify({'message': 'Deleted'})

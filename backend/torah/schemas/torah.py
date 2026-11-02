@@ -24,6 +24,7 @@ class TorahPostCardSchema(Schema):
     youtube_video_id = fields.Str(allow_none=True)
     excerpt = fields.Method('get_excerpt')
     pub_date = fields.DateTime()
+    approved_to_publish = fields.Bool(allow_none=True)
     like_count = fields.Method('get_like_count')
 
     def get_cover_photo_url(self, obj):
@@ -53,6 +54,7 @@ class TorahPostSchema(Schema):
     photos = fields.Method('get_photos')
     pub_date = fields.DateTime()
     views_count = fields.Int()
+    approved_to_publish = fields.Bool(allow_none=True)
     created_by = fields.Str(allow_none=True)
     is_own_post = fields.Method('get_is_own_post')
     like_count = fields.Method('get_like_count')

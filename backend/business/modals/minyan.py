@@ -47,12 +47,28 @@ class Minyan(db.Model):
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Three-state moderation gate: None = pending guest submission awaiting
+    # admin review, True = live, False = rejected. Brand new -- every
+    # existing row was backfilled to True by the migration that added this
+    # column, and the owner-only add_minyan path keeps setting it True
+    # immediately, same as it implicitly always has.
+    approved_to_publish = db.Column(db.Boolean, nullable=True, index=True)
+
+    # Guest posting: filled only when this minyan time was submitted without
+    # an account (see routes/minyan.py's guest block). guest_manage_token is
+    # the no-login credential -- a private link emailed to the submitter,
+    # validated purely by this unique token.
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
+
     business = db.relationship('Business', backref=db.backref('minyanim', lazy=True, cascade='all, delete-orphan'))
     creator = db.relationship('User', foreign_keys=[created_by])
 
     def __init__(self, business_id, tefilah, source_name, label=None, days=None, season=None,
                  fixed_time=None, relative_anchor=None, relative_offset_minutes=None,
-                 notes=None, source_url=None, created_by=None):
+                 notes=None, source_url=None, created_by=None, approved_to_publish=True,
+                 guest_email=None, guest_phone=None, guest_manage_token=None):
         self.business_id = business_id
         self.tefilah = tefilah
         self.source_name = source_name
@@ -65,6 +81,10 @@ class Minyan(db.Model):
         self.notes = notes
         self.source_url = source_url
         self.created_by = created_by
+        self.approved_to_publish = approved_to_publish
+        self.guest_email = guest_email
+        self.guest_phone = guest_phone
+        self.guest_manage_token = guest_manage_token
 
     def __repr__(self):
         return f'Minyan({self.id}) business={self.business_id} {self.tefilah}'

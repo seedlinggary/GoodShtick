@@ -80,6 +80,7 @@ class EstatesListingSchema(Schema):
     contact_email = fields.Str(allow_none=True)
     contact_phone = fields.Str(allow_none=True)
     contact_whatsapp = fields.Str(allow_none=True)
+    contact_link = fields.Str(allow_none=True)
 
     attributes = fields.Raw(allow_none=True)
 

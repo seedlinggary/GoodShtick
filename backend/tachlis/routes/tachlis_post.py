@@ -1,8 +1,10 @@
 import json
 import os
 import re
+import secrets
 from datetime import datetime, timedelta
 
+import requests
 from flask import Blueprint, jsonify, request
 from sqlalchemy.orm import selectinload
 
@@ -18,6 +20,69 @@ from backend.alerts.routes.alert import maybe_send_digests
 tachlis_api = Blueprint('tachlis_api', __name__, url_prefix='/tachlis')
 
 TACHLIS_SITE_URL = os.environ.get('TACHLIS_SITE_URL', 'https://www.gutmoney.com')
+
+PHOTON_URL = 'https://photon.komoot.io/api/'
+# Photon returns 403 to Python's default User-Agent (a common bot
+# signature) -- confirmed live. A plain, honest, identifying User-Agent
+# (not a spoofed browser one) is what Nominatim/Photon's own usage policy
+# actually asks API consumers to send, and resolves the 403.
+PHOTON_HEADERS = {'User-Agent': f'GutShtick-Backend/1.0 ({TACHLIS_SITE_URL})'}
+
+# "Remote" alone isn't a place, but confirmed live that Photon still returns
+# SOME same-named-whatever match for it instead of correctly reporting no
+# result (e.g. "Remote" -> a town in rural Oregon) -- silently wrong
+# coordinates are worse than no coordinates, since they'd make a fully
+# remote job appear as a real "nearby job" for whichever community happens
+# to be near that bogus point. These are rejected outright rather than
+# geocoded.
+_VAGUE_LOCATION_TERMS = {
+    'remote', 'anywhere', 'various', 'n/a', 'na', 'tbd', 'usa', 'us',
+    'nationwide', 'worldwide', 'flexible', 'wfh', 'virtual', 'online',
+}
+
+
+def _geocode(location_text):
+    """Best-effort geocoding via Photon (free, no API key -- already trusted
+    and used client-side in src/shared/AddressAutocomplete.js for address
+    autocomplete; this is the first server-side use). Returns (lat, lng) or
+    (None, None) on no match, a non-place/vague location, or any failure --
+    never raises, since a posting flow must never be blocked by a flaky
+    third-party geocoder."""
+    if not location_text:
+        return None, None
+    # Drop a trailing "(possibly remote)"/"(hybrid)"-style qualifier --
+    # confirmed live that leaving it in confuses Photon's ranking away from
+    # the real place (e.g. "Modiin (possibly remote)" matched Ontario,
+    # Canada; "Modiin" alone correctly matches Modiin, Israel).
+    text = re.sub(r'\s*\([^)]*\)\s*$', '', location_text).strip()
+    # "Remote - Tel Aviv" / "Hybrid - Lakewood, NJ" -- geocode just the real
+    # place after the dash, dropping the work-arrangement qualifier that
+    # would otherwise be sent to Photon as part of the query.
+    if '-' in text:
+        prefix, _, rest = text.partition('-')
+        if prefix.strip().lower() in _VAGUE_LOCATION_TERMS and rest.strip():
+            text = rest.strip()
+    if not text or text.lower() in _VAGUE_LOCATION_TERMS:
+        return None, None
+    try:
+        res = requests.get(PHOTON_URL, params={'q': text, 'limit': 1},
+                            headers=PHOTON_HEADERS, timeout=5)
+        res.raise_for_status()
+        features = res.json().get('features') or []
+        if not features:
+            return None, None
+        top = features[0]
+        # A whole-country match (e.g. "Remote - Canada") is too broad to be
+        # a useful point for a ~70-mile "nearby jobs" radius -- confirmed
+        # live that Photon tags these as osm_value='country'. Rejected
+        # rather than enumerating every country name in the vague-terms set
+        # above.
+        if top['properties'].get('osm_value') == 'country':
+            return None, None
+        lng, lat = top['geometry']['coordinates']
+        return lat, lng
+    except Exception:
+        return None, None
 
 PAGE_SIZE = 20
 TITLE_MAX = 150
@@ -758,6 +823,8 @@ def create_post(current_user):
         if not business or not _can_manage(business, current_user):
             return jsonify({'message': 'Not authorized to post on behalf of that business'}), 403
 
+    lat, lng = _geocode(fields.get('location'))
+
     post = TachlisPost(
         post_type=fields['post_type'],
         title=fields['title'],
@@ -771,6 +838,8 @@ def create_post(current_user):
         source_posted_at=fields.get('source_posted_at'),
         expires_at=datetime.utcnow() + timedelta(days=EXPIRES_DAYS[fields['post_type']]),
         business_id=business.id if business else None,
+        lat=lat,
+        lng=lng,
     )
 
     # Same bypass create_shtick already uses for admin/super_admin posters --
@@ -812,6 +881,11 @@ def edit_post(current_user, post_id):
     if error:
         return error, 400
 
+    # Only re-geocode when location actually changed -- avoid a pointless
+    # Photon call on every edit when the poster didn't touch it.
+    if 'location' in fields and fields['location'] != post.location:
+        post.lat, post.lng = _geocode(fields['location'])
+
     for key, value in fields.items():
         setattr(post, key, value)
 
@@ -831,6 +905,154 @@ def delete_post(current_user, post_id):
     db.session.delete(post)
     db.session.commit()
     return jsonify({'message': 'Deleted'})
+
+
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
+
+
+# ── Guest (no-account) post routes ──────────────────────────────────────────
+# "Post without an account" -- anyone can submit a job/resume post with just
+# an email or phone; it lands in the SAME pending-approval queue every other
+# post goes through, and the guest manages it afterward via a private
+# emailed magic link (guest_manage_token), no login involved. Same
+# token-lookup-is-the-auth shape as still_available_token above.
+
+@tachlis_api.route('/posts/guest', methods=['POST'])
+def create_guest_post():
+    """Guest equivalent of create_post. Requires at least one of
+    guest_email/guest_phone. Always lands pending (approved_to_publish=None)
+    -- the is_boss/business_id auto-approve bypasses in create_post never
+    apply here, since there's no current_user to check either against."""
+    body = request.get_json() or {}
+    error, fields = _validate_post_fields(body, partial=False)
+    if error:
+        return error, 400
+
+    guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (body.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    lat, lng = _geocode(fields.get('location'))
+
+    post = TachlisPost(
+        post_type=fields['post_type'],
+        title=fields['title'],
+        body=fields['body'],
+        contact=fields['contact'],
+        user_id=None,
+        location=fields.get('location'),
+        compensation=fields.get('compensation'),
+        category=fields.get('category'),
+        remote=fields.get('remote'),
+        source_posted_at=fields.get('source_posted_at'),
+        expires_at=datetime.utcnow() + timedelta(days=EXPIRES_DAYS[fields['post_type']]),
+        lat=lat,
+        lng=lng,
+        guest_email=guest_email or None,
+        guest_phone=guest_phone or None,
+        guest_manage_token=secrets.token_urlsafe(32),
+    )
+    # Force-pending, no matter what -- see docstring above.
+    post.approved_to_publish = None
+
+    db.session.add(post)
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            emails.send_guest_submission_email(
+                guest_email, 'your job post', post.title,
+                f'{TACHLIS_SITE_URL}/guest/tachlis/{post.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    schema = make_tachlis_post_schema(None, many=False, card=False)
+    # The schema never exposes guest_manage_token (it would leak into any
+    # public/admin dump that reuses this same schema) -- added back in only
+    # on this one create response, which only the submitter ever sees, so
+    # they have something to act on immediately even if the email bounces
+    # or they only gave a phone number.
+    data = schema.dump(post)
+    data['guest_manage_token'] = post.guest_manage_token
+    return jsonify(data), 201
+
+
+@tachlis_api.route('/posts/guest/<token>', methods=['GET'])
+def get_guest_post(token):
+    post = TachlisPost.query.filter_by(guest_manage_token=token).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+    schema = make_tachlis_post_schema(None, many=False, card=False)
+    return jsonify(schema.dump(post))
+
+
+@tachlis_api.route('/posts/guest/<token>', methods=['PATCH'])
+def edit_guest_post(token):
+    post = TachlisPost.query.filter_by(guest_manage_token=token).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+
+    body = request.get_json() or {}
+    error, fields = _validate_post_fields(body, partial=True)
+    if error:
+        return error, 400
+
+    # Only re-geocode when location actually changed -- same as edit_post.
+    if 'location' in fields and fields['location'] != post.location:
+        post.lat, post.lng = _geocode(fields['location'])
+
+    for key, value in fields.items():
+        setattr(post, key, value)
+
+    db.session.commit()
+    schema = make_tachlis_post_schema(None, many=False, card=False)
+    return jsonify(schema.dump(post))
+
+
+@tachlis_api.route('/posts/guest/<token>', methods=['DELETE'])
+def delete_guest_post(token):
+    post = TachlisPost.query.filter_by(guest_manage_token=token).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+    db.session.delete(post)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'})
+
+
+@tachlis_api.route('/posts/guest/<token>/renew', methods=['POST'])
+def renew_guest_post(token):
+    post = TachlisPost.query.filter_by(guest_manage_token=token).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+    post.renew()
+    db.session.commit()
+    schema = make_tachlis_post_schema(None, many=False, card=False)
+    return jsonify(schema.dump(post))
+
+
+@tachlis_api.route('/posts/guest/<token>/status', methods=['PATCH'])
+def set_guest_post_status(token):
+    post = TachlisPost.query.filter_by(guest_manage_token=token).first()
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+    body = request.get_json(silent=True) or {}
+    status = body.get('status')
+    if status not in POST_STATUSES:
+        return jsonify({'message': f'status must be one of: {", ".join(POST_STATUSES)}'}), 400
+    post.status = status
+    if status != 'active':
+        post.expires_at = datetime.utcnow()
+    db.session.commit()
+    schema = make_tachlis_post_schema(None, many=False, card=False)
+    return jsonify(schema.dump(post))
 
 
 # ── Admin moderation routes ─────────────────────────────────────────────────

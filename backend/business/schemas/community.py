@@ -20,6 +20,7 @@ class CommunitySchema(Schema):
     eruv_url = fields.Str(allow_none=True)
     eruv_map_image = fields.Str(allow_none=True)
     eruv_map_image_url = fields.Method('get_eruv_map_image_url')
+    sub_areas = fields.Raw(allow_none=True)
 
     def get_logo_url(self, obj):
         if not obj.logo:
@@ -49,6 +50,7 @@ class MinyanSchema(Schema):
     source_url = fields.Str(allow_none=True)
     pub_date = fields.DateTime()
     updated_at = fields.DateTime(allow_none=True)
+    approved_to_publish = fields.Bool(allow_none=True)
 
     def get_fixed_time(self, obj):
         return obj.fixed_time.strftime('%H:%M') if obj.fixed_time else None

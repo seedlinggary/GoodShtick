@@ -52,6 +52,17 @@ class Community(db.Model):
     # when we actually have the map.
     eruv_map_image = db.Column(db.String(300), nullable=True)
 
+    # Curated neighborhoods within this community (e.g. Beit Shemesh's
+    # Mishkafayim/Ramat Shilo/Neve Shamir/Ramat Gimmel) -- a list of
+    # {"name": str, "match": [str, ...]} dicts. Deliberately curated by
+    # whoever manages this community rather than auto-derived from
+    # EstatesListing.neighborhood's free text: real neighborhood data is
+    # messy (parentheticals, abbreviations, spelling variants -- confirmed
+    # live), so `match` lets one sub-area absorb known variants (e.g. both
+    # "RBS Gimmel 2" and "Ramat Gimmel 2") without a schema change. See
+    # routes/community.py's get_community()'s ?area= handling.
+    sub_areas = db.Column(db.JSON, nullable=True)
+
     source_url = db.Column(db.String(500), nullable=True)
     source_name = db.Column(db.String(150), nullable=True)
     # Same derivation convention as Business.imported: true when it came
@@ -62,12 +73,28 @@ class Community(db.Model):
     created_by = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=True)
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
+    # Guest posting: filled only when this community was submitted without
+    # an account (see routes/community.py's guest block). guest_manage_token
+    # is the no-login credential: a private link emailed to the submitter,
+    # validated purely by this unique token.
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
+
+    # Three-state moderation gate: None = pending guest submission awaiting
+    # admin review, True = live, False = rejected. Every existing row was
+    # backfilled to True by the migration that added this column, and every
+    # logged-in create path sets it True immediately -- only a brand new
+    # guest submission is ever inserted with this left None.
+    approved_to_publish = db.Column(db.Boolean, nullable=True, index=True)
+
     creator = db.relationship('User', foreign_keys=[created_by])
 
     def __init__(self, slug, name, city, description=None, state=None, country=None,
                  lat=None, lng=None, logo=None, created_by=None, source_url=None,
                  source_name=None, imported=False, eruv_status=None, eruv_url=None,
-                 eruv_map_image=None):
+                 eruv_map_image=None, approved_to_publish=True, guest_email=None,
+                 guest_phone=None, guest_manage_token=None):
         self.slug = slug
         self.name = name
         self.city = city
@@ -84,6 +111,53 @@ class Community(db.Model):
         self.eruv_status = eruv_status
         self.eruv_url = eruv_url
         self.eruv_map_image = eruv_map_image
+        self.approved_to_publish = approved_to_publish
+        self.guest_email = guest_email
+        self.guest_phone = guest_phone
+        self.guest_manage_token = guest_manage_token
 
     def __repr__(self):
         return f'Community({self.id}) {self.name}'
+
+
+class CommunityDataCache(db.Model):
+    """Generic cache for this domain's own slow/cacheable external calls --
+    today that's GPT cost-of-living estimates (see
+    routes/community.py's get_cost_of_living), keyed by a string like
+    'col:<slug>'. Same shape/reasoning as
+    backend/finance/modals/finance.py's FinanceDataCache: an LLM call is slow
+    and costs money per request, so a fresh-enough answer is served straight
+    back from here instead of asking the model again on every page load."""
+    __tablename__ = 'community_data_cache'
+
+    id = db.Column(db.Integer, primary_key=True)
+    cache_key = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    payload = db.Column(db.JSON, nullable=False)
+    fetched_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    def __init__(self, cache_key, payload):
+        self.cache_key = cache_key
+        self.payload = payload
+
+
+class CommunitySave(db.Model):
+    """A member's own 'save this community' bookmark -- lets someone keep a
+    shortlist of communities they're considering (e.g. while comparing a few
+    before a move), same save/favorite idea as EstatesListingLike."""
+    __tablename__ = 'community_save'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False, index=True)
+    community_id = db.Column(db.Integer, db.ForeignKey('community.id'), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'community_id', name='uq_community_save_user_community'),
+    )
+
+    user = db.relationship('User', foreign_keys=[user_id])
+    community = db.relationship('Community', foreign_keys=[community_id])
+
+    def __init__(self, user_id, community_id):
+        self.user_id = user_id
+        self.community_id = community_id

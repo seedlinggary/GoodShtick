@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy.orm import selectinload
 
 from config import db
-from security import token_required, token_optional
+from security import token_required, token_optional, admin_required
 from upload import upload_file
 from backend.estates.modals.estates import (
     EstatesGroupBuy, EstatesGroupBuyPhoto, EstatesGroupBuyMember,
@@ -23,6 +23,8 @@ PAGE_SIZE = 24
 TITLE_MAX = 150
 DESCRIPTION_MAX = 4000
 NOTE_MAX = 500
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
 
 
 def _feed_options():
@@ -145,7 +147,7 @@ def list_group_buys(current_user):
     except (TypeError, ValueError):
         page = 1
 
-    query = EstatesGroupBuy.query.options(*_feed_options())
+    query = EstatesGroupBuy.query.options(*_feed_options()).filter(EstatesGroupBuy.approved_to_publish.is_(True))
     if not include_closed:
         query = query.filter(EstatesGroupBuy.is_closed.is_(False))
     if city:
@@ -184,7 +186,7 @@ def list_group_buys(current_user):
 def get_group_buy(current_user, identifier):
     query = EstatesGroupBuy.query.options(*_feed_options())
     gb = query.filter_by(id=int(identifier)).first() if identifier.isdigit() else query.filter_by(slug=identifier).first()
-    if not gb:
+    if not gb or (gb.approved_to_publish is not True and not _can_manage(gb, current_user)):
         return jsonify({'message': 'Group buy not found'}), 404
     return jsonify(make_group_buy_schema(current_user).dump(gb))
 
@@ -201,7 +203,8 @@ def create_group_buy(current_user):
     if photos is not None and (not isinstance(photos, list) or len(photos) > MAX_PHOTOS):
         return jsonify({'message': f'photos must be a list of at most {MAX_PHOTOS} filenames'}), 400
 
-    gb = EstatesGroupBuy(slug=_unique_slug(fields['title']), created_by=current_user.public_id, **fields)
+    gb = EstatesGroupBuy(slug=_unique_slug(fields['title']), created_by=current_user.public_id,
+                          approved_to_publish=True, **fields)
     db.session.add(gb)
     db.session.flush()
     for i, filename in enumerate((photos or [])[:MAX_PHOTOS]):
@@ -209,6 +212,125 @@ def create_group_buy(current_user):
             db.session.add(EstatesGroupBuyPhoto(group_buy_id=gb.id, filename=filename, position=i))
     db.session.commit()
     return jsonify(make_group_buy_schema(current_user).dump(gb)), 201
+
+
+@group_buy_api.route('/group-buys/guest', methods=['POST'])
+def create_guest_group_buy():
+    body = request.get_json() or {}
+    error, fields = _validate_body(body, partial=False)
+    if error:
+        return error, 400
+
+    photos = body.get('photos')
+    if photos is not None and (not isinstance(photos, list) or len(photos) > MAX_PHOTOS):
+        return jsonify({'message': f'photos must be a list of at most {MAX_PHOTOS} filenames'}), 400
+
+    guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (body.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    import secrets
+    gb = EstatesGroupBuy(
+        slug=_unique_slug(fields['title']), created_by=None, approved_to_publish=None,
+        guest_email=guest_email or None, guest_phone=guest_phone or None,
+        guest_manage_token=secrets.token_urlsafe(32), **fields,
+    )
+    db.session.add(gb)
+    db.session.flush()
+    for i, filename in enumerate((photos or [])[:MAX_PHOTOS]):
+        if filename:
+            db.session.add(EstatesGroupBuyPhoto(group_buy_id=gb.id, filename=filename, position=i))
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            from backend.estates.routes.estates import ESTATES_SITE_URL
+            emails.send_guest_submission_email(
+                guest_email, 'your group buy listing', gb.title,
+                f'{ESTATES_SITE_URL}/guest/group-buy/{gb.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    data = make_group_buy_schema(None).dump(gb)
+    data['guest_manage_token'] = gb.guest_manage_token
+    return jsonify(data), 201
+
+
+@group_buy_api.route('/group-buys/guest/<token>', methods=['GET'])
+def get_guest_group_buy(token):
+    gb = EstatesGroupBuy.query.options(*_feed_options()).filter_by(guest_manage_token=token).first()
+    if not gb:
+        return jsonify({'message': 'Group buy not found'}), 404
+    return jsonify(make_group_buy_schema(None).dump(gb))
+
+
+@group_buy_api.route('/group-buys/guest/<token>', methods=['PATCH'])
+def edit_guest_group_buy(token):
+    gb = EstatesGroupBuy.query.filter_by(guest_manage_token=token).first()
+    if not gb:
+        return jsonify({'message': 'Group buy not found'}), 404
+
+    body = request.get_json() or {}
+    error, fields = _validate_body(body, partial=True, existing=gb)
+    if error:
+        return error, 400
+    for key, value in fields.items():
+        setattr(gb, key, value)
+    if 'is_closed' in body:
+        gb.is_closed = bool(body.get('is_closed'))
+
+    if 'photos' in body:
+        photos = body.get('photos')
+        if photos is not None and (not isinstance(photos, list) or len(photos) > MAX_PHOTOS):
+            return jsonify({'message': f'photos must be a list of at most {MAX_PHOTOS} filenames'}), 400
+        for photo in list(gb.photos):
+            db.session.delete(photo)
+        db.session.flush()
+        for i, filename in enumerate(photos or []):
+            if filename:
+                db.session.add(EstatesGroupBuyPhoto(group_buy_id=gb.id, filename=filename, position=i))
+
+    db.session.commit()
+    return jsonify(make_group_buy_schema(None).dump(gb))
+
+
+@group_buy_api.route('/group-buys/guest/<token>', methods=['DELETE'])
+def delete_guest_group_buy(token):
+    gb = EstatesGroupBuy.query.filter_by(guest_manage_token=token).first()
+    if not gb:
+        return jsonify({'message': 'Group buy not found'}), 404
+    db.session.delete(gb)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'})
+
+
+@group_buy_api.route('/admin/group-buys/pending', methods=['GET'])
+@admin_required
+def get_pending_group_buys(_current_user):
+    pending = (EstatesGroupBuy.query.options(*_feed_options())
+               .filter_by(approved_to_publish=None)
+               .order_by(EstatesGroupBuy.pub_date.asc()).all())
+    return jsonify(make_group_buy_schema(None, many=True).dump(pending))
+
+
+@group_buy_api.route('/admin/group-buys/<int:group_buy_id>/approve', methods=['POST'])
+@admin_required
+def approve_group_buy(_current_user, group_buy_id):
+    gb = db.session.get(EstatesGroupBuy, group_buy_id)
+    if not gb:
+        return jsonify({'message': 'Group buy not found'}), 404
+    body = request.get_json(silent=True) or {}
+    approved = not body.get('reject', False)
+    gb.approved_to_publish = approved
+    db.session.commit()
+    return jsonify({'message': 'approved' if approved else 'rejected'})
 
 
 @group_buy_api.route('/group-buys/<int:group_buy_id>', methods=['PATCH'])
@@ -262,7 +384,8 @@ def group_buy_sitemap_data():
     """Minimal {slug, updated} rows for every open group buy -- same lean-
     query pattern as estates.py's own sitemap_data()."""
     rows = (db.session.query(EstatesGroupBuy.slug, EstatesGroupBuy.pub_date)
-            .filter(EstatesGroupBuy.is_closed.is_(False)).all())
+            .filter(EstatesGroupBuy.is_closed.is_(False),
+                    EstatesGroupBuy.approved_to_publish.is_(True)).all())
     return jsonify({
         'group_buys': [{'slug': slug, 'updated': pub_date.isoformat() if pub_date else None} for slug, pub_date in rows],
     })
@@ -272,7 +395,7 @@ def group_buy_sitemap_data():
 @token_required
 def join_group_buy(current_user, group_buy_id):
     gb = db.session.get(EstatesGroupBuy, group_buy_id)
-    if not gb:
+    if not gb or gb.approved_to_publish is not True:
         return jsonify({'message': 'Group buy not found'}), 404
     if gb.is_closed:
         return jsonify({'message': 'This group buy is closed'}), 400

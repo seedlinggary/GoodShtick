@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
@@ -12,6 +13,10 @@ from backend.hock.schemas.hock import make_comment_schema
 from backend.notifications.helpers import notify
 
 hock_comment_api = Blueprint('hock_comment_api', __name__, url_prefix='/hock')
+
+GUEST_EMAIL_MAX = 150
+GUEST_PHONE_MAX = 40
+MAIN_SITE_URL = os.environ.get('MAIN_SITE_URL', 'https://www.gutshtick.com')
 
 
 @hock_comment_api.route('/posts/<int:post_id>/comments', methods=['GET'])
@@ -92,6 +97,98 @@ def add_comment(current_user):
     db.session.commit()
     schema = make_comment_schema(current_user, many=False)
     return jsonify(schema.dump(comment)), 201
+
+
+@hock_comment_api.route('/comments/guest', methods=['POST'])
+def create_guest_comment():
+    """Same as add_comment, minus the login requirement -- lands pending
+    (approved_to_publish=None) instead of visible immediately. No
+    notification fires here since the comment isn't live yet."""
+    body = request.get_json() or {}
+    text = (body.get('text') or '').strip()
+    post_id = body.get('hock_post_id')
+    if not text or not post_id:
+        return jsonify({'message': 'text and hock_post_id are required'}), 400
+
+    post = db.session.get(HockPost, post_id)
+    if not post:
+        return jsonify({'message': 'Post not found'}), 404
+
+    parent_id = body.get('parent_comment_id')
+    if parent_id:
+        parent = db.session.get(HockComment, parent_id)
+        if not parent or parent.hock_post_id != post.id:
+            return jsonify({'message': 'Parent comment does not belong to this post'}), 400
+
+    guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
+    guest_phone = (body.get('guest_phone') or '').strip()[:GUEST_PHONE_MAX]
+    if not (guest_email or guest_phone):
+        return jsonify({'message': 'At least one of guest_email or guest_phone is required'}), 400
+
+    from backend.guest.modals.guest_throttle import check_and_record_guest_submission
+    if not check_and_record_guest_submission(request):
+        return jsonify({'message': 'Too many submissions from this network today -- please try again tomorrow.'}), 429
+
+    import secrets
+    comment = HockComment(
+        text=text, hock_post_id=post.id, user_id=None, parent_comment_id=parent_id or None,
+        approved_to_publish=None, guest_email=guest_email or None, guest_phone=guest_phone or None,
+        guest_manage_token=secrets.token_urlsafe(32),
+    )
+    db.session.add(comment)
+    db.session.commit()
+
+    if guest_email:
+        try:
+            from backend.alerts import emails
+            emails.send_guest_submission_email(
+                guest_email, 'your comment', 'your comment',
+                f'{MAIN_SITE_URL}/guest/hock-comment/{comment.guest_manage_token}',
+            )
+        except Exception:
+            pass  # an email failure should never break the actual submission
+
+    schema = make_comment_schema(None, many=False)
+    # guest_manage_token is never on the schema itself (would leak into any
+    # public dump reusing it) -- added back only on this one create response.
+    data = schema.dump(comment)
+    data['guest_manage_token'] = comment.guest_manage_token
+    return jsonify(data), 201
+
+
+@hock_comment_api.route('/comments/guest/<token>', methods=['GET'])
+def get_guest_comment(token):
+    comment = HockComment.query.filter_by(guest_manage_token=token).first()
+    if not comment:
+        return jsonify({'message': 'Comment not found'}), 404
+    schema = make_comment_schema(None, many=False)
+    return jsonify(schema.dump(comment))
+
+
+@hock_comment_api.route('/comments/guest/<token>', methods=['PATCH'])
+def edit_guest_comment(token):
+    comment = HockComment.query.filter_by(guest_manage_token=token).first()
+    if not comment:
+        return jsonify({'message': 'Comment not found'}), 404
+    body = request.get_json() or {}
+    new_text = (body.get('text') or '').strip()
+    if not new_text:
+        return jsonify({'message': 'Comment cannot be empty'}), 400
+    comment.text = new_text
+    comment.edited_at = datetime.utcnow()
+    db.session.commit()
+    schema = make_comment_schema(None, many=False)
+    return jsonify(schema.dump(comment))
+
+
+@hock_comment_api.route('/comments/guest/<token>', methods=['DELETE'])
+def delete_guest_comment(token):
+    comment = HockComment.query.filter_by(guest_manage_token=token).first()
+    if not comment:
+        return jsonify({'message': 'Comment not found'}), 404
+    db.session.delete(comment)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'})
 
 
 @hock_comment_api.route('/comments/<int:comment_id>', methods=['PATCH'])

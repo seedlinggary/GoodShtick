@@ -56,6 +56,23 @@ class TorahPost(db.Model):
     pub_date = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     views_count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
 
+    # Three-state: True = live, False = rejected, None = pending review.
+    # Every logged-in member's own create path (routes/torah_post.py's
+    # create_post) sets this True explicitly; only a guest (no-account)
+    # post is ever inserted with it left None. Existing rows predate this
+    # column entirely and were backfilled to True by the migration that
+    # added it, since they were all already-live, previously-public posts.
+    approved_to_publish = db.Column(db.Boolean, nullable=True, index=True)
+
+    # Set only for a no-account ("guest") post. guest_manage_token is the
+    # no-login credential: a private link emailed at submission time (and
+    # shown once on-screen) that lets the poster edit/delete without ever
+    # creating an account -- same shape as every other domain's guest
+    # fields (see e.g. backend/tachlis/modals/tachlis_post.py).
+    guest_email = db.Column(db.String(150), nullable=True)
+    guest_phone = db.Column(db.String(40), nullable=True)
+    guest_manage_token = db.Column(db.String(64), nullable=True, unique=True, index=True)
+
     photos = db.relationship('TorahPostPhoto', backref='post', lazy=True,
                               cascade='all, delete-orphan', order_by='TorahPostPhoto.position')
     likes = db.relationship('TorahPostLike', backref='post', lazy=True, cascade='all, delete-orphan')
