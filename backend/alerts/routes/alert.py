@@ -37,6 +37,7 @@ from urllib.parse import parse_qsl
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy.orm import selectinload
 from werkzeug.datastructures import MultiDict
 
 from config import db
@@ -217,6 +218,37 @@ def update_alert(current_user, alert_id):
     if not alert or alert.user_id != current_user.public_id:
         return jsonify({'message': 'Alert not found'}), 404
     body = request.get_json(silent=True) or {}
+
+    # Editing the saved search itself (not just its delivery settings) --
+    # re-validated through the exact same dry-run create_alert uses, so an
+    # edit can never leave an alert with a filter the live search itself
+    # would reject.
+    new_search_type = alert.search_type
+    new_filters = alert.filters
+    if 'search_type' in body:
+        new_search_type = (body.get('search_type') or '').strip().lower()
+        if new_search_type not in SEARCH_TYPES:
+            return jsonify({'message': f'search_type must be one of: {", ".join(SEARCH_TYPES)}'}), 400
+    if 'filters' in body:
+        new_filters = (body.get('filters') or '').strip().lstrip('?')
+        if not new_filters or len(new_filters) > FILTERS_MAX:
+            return jsonify({'message': 'filters is required'}), 400
+    search_changed = new_search_type != alert.search_type or new_filters != alert.filters
+    if search_changed:
+        try:
+            _validate_filters(new_search_type, new_filters)
+        except ValueError as e:
+            return jsonify({'message': str(e)}), 400
+        alert.search_type = new_search_type
+        alert.filters = new_filters
+        # Resets the watermark so the next digest only reports items that
+        # are genuinely new since the edit, instead of re-sending
+        # everything the NEW filters match that predates it -- which, the
+        # very first time this runs, could be the search's entire history.
+        alert.last_notified_at = datetime.utcnow()
+
+    if 'label' in body:
+        alert.label = (body.get('label') or '').strip()[:LABEL_MAX] or None
     if 'paused' in body:
         alert.paused = bool(body['paused'])
     if 'cadence' in body:
@@ -624,6 +656,61 @@ def maybe_send_digests():
         _maybe_run_scheduled_digest()
     except Exception:
         pass
+
+
+ADMIN_ALERTS_PAGE_SIZE = 50
+
+
+@alerts_api.route('/admin', methods=['GET'])
+@super_admin_required
+def list_all_alerts(_current_user):
+    """Every alert set anywhere on the site, for SuperAdmin's "All Alerts"
+    view -- distinct from /admin/schedule below, which is about WHEN the
+    digest sends, not WHO has one. Paginated the same
+    {items, total, page, per_page, has_more} shape backend/user/routes/
+    admin.py's own admin lists use. AlertSchema deliberately never includes
+    email/user_id (see its own docstring -- a regular member's "My Alerts"
+    never needs them), so this augments the dumped dict with them, the same
+    way list_users() adds its own extra per-row fields on top of
+    user_schema's base dump."""
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+
+    query = Alert.query.options(selectinload(Alert.user))
+    search_type = (request.args.get('search_type') or '').strip()
+    if search_type:
+        if search_type not in SEARCH_TYPES:
+            return jsonify({'message': f'search_type must be one of: {", ".join(SEARCH_TYPES)}'}), 400
+        query = query.filter_by(search_type=search_type)
+    confirmed = request.args.get('confirmed')
+    if confirmed in ('0', '1'):
+        query = query.filter_by(confirmed=(confirmed == '1'))
+    paused = request.args.get('paused')
+    if paused in ('0', '1'):
+        query = query.filter_by(paused=(paused == '1'))
+    q = (request.args.get('q') or '').strip()
+    if q:
+        like = f'%{q}%'
+        query = query.filter(db.or_(Alert.email.ilike(like), Alert.label.ilike(like)))
+
+    query = query.order_by(Alert.created_at.desc())
+    total = query.count()
+    rows = query.offset((page - 1) * ADMIN_ALERTS_PAGE_SIZE).limit(ADMIN_ALERTS_PAGE_SIZE).all()
+
+    items = []
+    for a in rows:
+        data = alert_schema.dump(a)
+        data['email'] = a.email
+        data['user_id'] = a.user_id
+        data['profile_name'] = a.user.profile_name if a.user else None
+        items.append(data)
+
+    return jsonify({
+        'items': items, 'total': total, 'page': page,
+        'per_page': ADMIN_ALERTS_PAGE_SIZE, 'has_more': page * ADMIN_ALERTS_PAGE_SIZE < total,
+    })
 
 
 @alerts_api.route('/admin/schedule', methods=['GET'])

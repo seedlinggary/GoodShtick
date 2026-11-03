@@ -43,6 +43,18 @@ MIN_COMPARABLES = 5
 BELOW_MARKET_THRESHOLD = 0.9  # listing must be at or under 90% of the area/room median
 
 
+def _size_sqm_expr():
+    """Normalizes size_value to square meters regardless of size_unit, as a
+    SQL expression usable in a filter/aggregate -- mirrors
+    _add_price_context's own per-listing conversion exactly (sqft is the
+    only unit ever converted; anything else, including a missing
+    size_unit, is treated as already-sqm)."""
+    return case(
+        (EstatesListing.size_unit == 'sqft', EstatesListing.size_value * SQFT_TO_SQM),
+        else_=EstatesListing.size_value,
+    )
+
+
 def _add_price_context(listing):
     """Attaches price_per_sqm/market_median_price/below_market_price as
     transient (non-persisted) attributes, read by EstatesListingSchema's
@@ -417,6 +429,26 @@ def _apply_listing_filters(query, args):
         max_bedrooms = float(args.get('max_bedrooms')) if args.get('max_bedrooms') not in (None, '') else None
     except (TypeError, ValueError):
         raise FilterError('min_bedrooms/max_bedrooms must be numbers')
+    try:
+        min_bathrooms = float(args.get('min_bathrooms')) if args.get('min_bathrooms') not in (None, '') else None
+        max_bathrooms = float(args.get('max_bathrooms')) if args.get('max_bathrooms') not in (None, '') else None
+    except (TypeError, ValueError):
+        raise FilterError('min_bathrooms/max_bathrooms must be numbers')
+    try:
+        min_size_sqm = float(args.get('min_size_sqm')) if args.get('min_size_sqm') not in (None, '') else None
+        max_size_sqm = float(args.get('max_size_sqm')) if args.get('max_size_sqm') not in (None, '') else None
+    except (TypeError, ValueError):
+        raise FilterError('min_size_sqm/max_size_sqm must be numbers')
+    try:
+        min_price_per_sqm = float(args.get('min_price_per_sqm')) if args.get('min_price_per_sqm') not in (None, '') else None
+        max_price_per_sqm = float(args.get('max_price_per_sqm')) if args.get('max_price_per_sqm') not in (None, '') else None
+    except (TypeError, ValueError):
+        raise FilterError('min_price_per_sqm/max_price_per_sqm must be numbers')
+    try:
+        min_price_per_bedroom = float(args.get('min_price_per_bedroom')) if args.get('min_price_per_bedroom') not in (None, '') else None
+        max_price_per_bedroom = float(args.get('max_price_per_bedroom')) if args.get('max_price_per_bedroom') not in (None, '') else None
+    except (TypeError, ValueError):
+        raise FilterError('min_price_per_bedroom/max_price_per_bedroom must be numbers')
 
     if listing_type:
         if listing_type not in LISTING_TYPES:
@@ -448,6 +480,36 @@ def _apply_listing_filters(query, args):
         query = query.filter(EstatesListing.bedrooms.isnot(None), EstatesListing.bedrooms >= min_bedrooms)
     if max_bedrooms is not None:
         query = query.filter(EstatesListing.bedrooms.isnot(None), EstatesListing.bedrooms <= max_bedrooms)
+    if min_bathrooms is not None:
+        query = query.filter(EstatesListing.bathrooms.isnot(None), EstatesListing.bathrooms >= min_bathrooms)
+    if max_bathrooms is not None:
+        query = query.filter(EstatesListing.bathrooms.isnot(None), EstatesListing.bathrooms <= max_bathrooms)
+    if min_size_sqm is not None or max_size_sqm is not None:
+        size_sqm = _size_sqm_expr()
+        query = query.filter(EstatesListing.size_value.isnot(None))
+        if min_size_sqm is not None:
+            query = query.filter(size_sqm >= min_size_sqm)
+        if max_size_sqm is not None:
+            query = query.filter(size_sqm <= max_size_sqm)
+    if min_price_per_sqm is not None or max_price_per_sqm is not None:
+        # nullif(size, 0) turns a 0-size row's ratio into NULL instead of a
+        # division-by-zero error -- Postgres doesn't guarantee AND operands
+        # evaluate in a short-circuiting left-to-right order, so an
+        # isnot(None)/>0 guard filter alongside the division in the same
+        # WHERE wouldn't reliably prevent the error on its own.
+        ppsqm = EstatesListing.price / func.nullif(_size_sqm_expr(), 0)
+        query = query.filter(EstatesListing.price.isnot(None), ppsqm.isnot(None))
+        if min_price_per_sqm is not None:
+            query = query.filter(ppsqm >= min_price_per_sqm)
+        if max_price_per_sqm is not None:
+            query = query.filter(ppsqm <= max_price_per_sqm)
+    if min_price_per_bedroom is not None or max_price_per_bedroom is not None:
+        ppbr = EstatesListing.price / func.nullif(EstatesListing.bedrooms, 0)
+        query = query.filter(EstatesListing.price.isnot(None), ppbr.isnot(None))
+        if min_price_per_bedroom is not None:
+            query = query.filter(ppbr >= min_price_per_bedroom)
+        if max_price_per_bedroom is not None:
+            query = query.filter(ppbr <= max_price_per_bedroom)
     if q:
         like = f'%{q}%'
         query = query.filter(db.or_(
@@ -567,6 +629,141 @@ def list_listings(current_user):
     return jsonify({
         'listings': EstatesListingCardSchema(many=True).dump(listings),
         'page': page, 'has_more': has_more, 'total': total,
+    })
+
+
+AREA_MIN_FOR_BREAKDOWN = 3
+BEDROOM_MIN_FOR_BREAKDOWN = 10
+BEDROOM_MIN_BUCKET = 3
+MAX_BEDROOM_BUCKET = 5  # collapses 5+ bedrooms into one bucket, same as community.py's housing block
+
+
+@estates_api.route('/market-analysis', methods=['GET'])
+def market_analysis():
+    """Self-serve market stats over the live listing data -- the "analyze
+    what we actually have" page. Takes the exact same filter vocabulary as
+    /estates/listings (_apply_listing_filters), so the frontend can fetch
+    the properties an analysis was computed from just by calling
+    /estates/listings with that same querystring -- the two endpoints can
+    never quietly disagree about what counts as a match. Median (not mean)
+    throughout, same reasoning as area_page()/community.py's housing block:
+    one outlier listing shouldn't swing a "typical price" figure."""
+    now = datetime.utcnow()
+
+    def _scoped():
+        q = EstatesListing.query.filter(
+            db.or_(EstatesListing.expires_at.is_(None), EstatesListing.expires_at > now),
+            EstatesListing.approved_to_publish.is_(True))
+        return _apply_listing_filters(q, request.args)
+
+    try:
+        count = _scoped().count()
+    except FilterError as e:
+        return jsonify({'message': str(e)}), 400
+
+    if count == 0:
+        return jsonify({'count': 0, 'by_currency': [], 'by_listing_type': [], 'by_area': []})
+
+    size_sqm = _size_sqm_expr()
+    price_per_sqm = EstatesListing.price / func.nullif(size_sqm, 0)
+    price_per_bedroom = EstatesListing.price / func.nullif(EstatesListing.bedrooms, 0)
+
+    # Each of these three metrics has its own real-world coverage (not every
+    # listing has a size_value or a bedroom count), so each is its own
+    # grouped query with its own null guard -- blending them into one query
+    # would silently shrink every metric's sample down to "has all three".
+    price_rows = (_scoped().filter(EstatesListing.price.isnot(None))
+                  .with_entities(EstatesListing.currency, func.count(EstatesListing.id),
+                                 func.percentile_cont(0.5).within_group(EstatesListing.price.asc()))
+                  .group_by(EstatesListing.currency).all())
+    sqm_rows = (_scoped().filter(EstatesListing.price.isnot(None), price_per_sqm.isnot(None))
+                .with_entities(EstatesListing.currency, func.count(EstatesListing.id),
+                               func.percentile_cont(0.5).within_group(price_per_sqm.asc()))
+                .group_by(EstatesListing.currency).all())
+    bedroom_price_rows = (_scoped().filter(EstatesListing.price.isnot(None), price_per_bedroom.isnot(None))
+                           .with_entities(EstatesListing.currency, func.count(EstatesListing.id),
+                                          func.percentile_cont(0.5).within_group(price_per_bedroom.asc()))
+                           .group_by(EstatesListing.currency).all())
+
+    by_currency = {}
+
+    def _entry(cur):
+        return by_currency.setdefault(cur, {
+            'currency': cur, 'count': 0, 'median_price': None,
+            'price_per_sqm': None, 'price_per_bedroom': None, 'by_bedrooms': [],
+        })
+
+    for cur, n, med in price_rows:
+        e = _entry(cur)
+        e['count'] = n
+        e['median_price'] = round(med, 2) if med is not None else None
+    for cur, n, med in sqm_rows:
+        _entry(cur)['price_per_sqm'] = {'count': n, 'median': round(med, 2) if med is not None else None}
+    for cur, n, med in bedroom_price_rows:
+        _entry(cur)['price_per_bedroom'] = {'count': n, 'median': round(med, 2) if med is not None else None}
+
+    # Median price (and $/sqm) by bedroom-count bucket, per currency -- only
+    # once a currency has enough priced+bedroomed listings to bucket
+    # meaningfully, and only for a bucket with enough of its own, so a
+    # 2-listing "bucket" never gets presented as a real market figure.
+    for cur, entry in by_currency.items():
+        if entry['count'] < BEDROOM_MIN_FOR_BREAKDOWN:
+            continue
+        bucket_col = func.least(func.floor(EstatesListing.bedrooms), MAX_BEDROOM_BUCKET)
+        bucket_rows = (_scoped()
+                       .filter(EstatesListing.currency == cur, EstatesListing.price.isnot(None),
+                               EstatesListing.bedrooms.isnot(None))
+                       .with_entities(bucket_col.label('bucket'), func.count(EstatesListing.id),
+                                      func.percentile_cont(0.5).within_group(EstatesListing.price.asc()),
+                                      func.percentile_cont(0.5).within_group(price_per_sqm.asc()))
+                       .group_by('bucket')
+                       .having(func.count(EstatesListing.id) >= BEDROOM_MIN_BUCKET)
+                       .order_by('bucket').all())
+        entry['by_bedrooms'] = [
+            {
+                'bedrooms': int(bucket), 'is_max_bucket': bucket >= MAX_BEDROOM_BUCKET,
+                'count': bn, 'median_price': round(bmed, 2) if bmed is not None else None,
+                'median_price_per_sqm': round(bsqm, 2) if bsqm is not None else None,
+            }
+            for bucket, bn, bmed, bsqm in bucket_rows
+        ]
+
+    # Breakdown by listing type -- skipped when the search is already
+    # pinned to one type, since a one-row breakdown of "the thing you
+    # already filtered to" tells you nothing new.
+    by_listing_type = []
+    if not (request.args.get('listing_type') or '').strip():
+        type_rows = (_scoped().filter(EstatesListing.price.isnot(None))
+                     .with_entities(EstatesListing.listing_type, func.count(EstatesListing.id),
+                                    func.percentile_cont(0.5).within_group(EstatesListing.price.asc()))
+                     .group_by(EstatesListing.listing_type).all())
+        by_listing_type = [
+            {'listing_type': t, 'count': n, 'median_price': round(med, 2) if med is not None else None}
+            for t, n, med in type_rows
+        ]
+
+    # Top areas (neighborhood, falling back to city) within this filtered
+    # set -- lets a broad search ("all of Beit Shemesh") show which
+    # sub-areas make up that count and compare their prices, same
+    # neighborhood-over-city precedence as _resolve_area/list_areas.
+    area_col = func.coalesce(EstatesListing.neighborhood, EstatesListing.city)
+    area_rows = (_scoped().filter(area_col.isnot(None), area_col != '')
+                 .with_entities(area_col.label('area'), func.count(EstatesListing.id),
+                                func.percentile_cont(0.5).within_group(EstatesListing.price.asc()))
+                 .group_by('area')
+                 .having(func.count(EstatesListing.id) >= AREA_MIN_FOR_BREAKDOWN)
+                 .order_by(func.count(EstatesListing.id).desc())
+                 .limit(15).all())
+    by_area = [
+        {'area': a, 'count': n, 'median_price': round(med, 2) if med is not None else None}
+        for a, n, med in area_rows
+    ]
+
+    return jsonify({
+        'count': count,
+        'by_currency': sorted(by_currency.values(), key=lambda e: -e['count']),
+        'by_listing_type': by_listing_type,
+        'by_area': by_area,
     })
 
 
