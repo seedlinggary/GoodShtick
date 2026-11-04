@@ -1,6 +1,6 @@
 import random
 import secrets
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
@@ -196,27 +196,59 @@ def _visitor_day_stats(site=None):
     return {anon_id: (first_day, day_count) for anon_id, first_day, day_count in rows}
 
 
-def _new_vs_returning_counts(days, staff_ids, day_stats_by_id, site=None):
+def _window_event_counts(days, staff_ids, site=None):
+    """anonymous_id -> how many of its own VisitorEvent rows fall in the last
+    `days` days -- used to tell a true bounce (never came back at all, not
+    even later in the window) apart from a visitor who's simply newly-seen
+    this period but genuinely browsed."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    query = (db.session.query(VisitorEvent.anonymous_id, func.count(VisitorEvent.id))
+             .join(VisitorSession, VisitorSession.anonymous_id == VisitorEvent.anonymous_id)
+             .filter(VisitorEvent.created_at >= cutoff, VisitorSession.is_localhost.is_(False)))
+    query = _filter_site(query, VisitorEvent, site)
+    if staff_ids:
+        query = query.filter(db.or_(VisitorSession.user_id.is_(None),
+                                     ~VisitorSession.user_id.in_(staff_ids)))
+    return dict(query.group_by(VisitorEvent.anonymous_id).all())
+
+
+def _new_returning_bounced_counts(days, staff_ids, day_stats_by_id, site=None):
+    """Splits every visitor active in the window into exactly one of three
+    buckets: bounced (never had more than a single page view across the
+    WHOLE window -- the "didn't really visit" case), returning (2+ distinct
+    calendar days active, ever), or new (neither). Mutually exclusive and
+    exhaustive over the same active-visitor set _visitor_counts() totals, so
+    the three numbers always sum to that total."""
     cutoff = datetime.utcnow() - timedelta(days=days)
     active = _exclude_staff(VisitorSession.query.filter(
         VisitorSession.last_seen >= cutoff, VisitorSession.is_localhost.is_(False),
     ), staff_ids)
     active_ids = _filter_site(active, VisitorSession, site).with_entities(VisitorSession.anonymous_id).distinct().all()
+    window_counts = _window_event_counts(days, staff_ids, site)
     new_count = 0
     returning_count = 0
+    bounced_count = 0
     for (anon_id,) in active_ids:
+        if window_counts.get(anon_id, 0) <= 1:
+            bounced_count += 1
+            continue
         _, day_count = day_stats_by_id.get(anon_id, (None, 1))
         if day_count >= 2:
             returning_count += 1
         else:
             new_count += 1
-    return {'new': new_count, 'returning': returning_count}
+    return {'new': new_count, 'returning': returning_count, 'bounced': bounced_count}
 
 
 def _daily_new_vs_returning(days, staff_ids, day_stats_by_id, site=None):
-    """Per-day new/returning split for the trend chart -- for each calendar
-    day, how many distinct visitors were active, split by whether that day
-    was their first-ever active day or a later, repeat day."""
+    """Per-day new/returning/bounced split for the trend chart -- for each
+    calendar day, how many distinct visitors were active, split three ways:
+    bounced (only a single page view that specific day), or -- for everyone
+    who looked at more than one page that day -- new (that day was their
+    first-ever active day) vs. returning (a later, repeat day). Not
+    `.distinct()`'d like the old version: telling a bounce apart from a real
+    visit needs the actual per-(visitor, day) page-view COUNT, not just
+    whether the pair occurred at all."""
     cutoff = datetime.utcnow() - timedelta(days=days)
     day_col = func.date(VisitorEvent.created_at)
     pairs = (db.session.query(VisitorEvent.anonymous_id, day_col.label('day'))
@@ -226,10 +258,13 @@ def _daily_new_vs_returning(days, staff_ids, day_stats_by_id, site=None):
     if staff_ids:
         pairs = pairs.filter(db.or_(VisitorSession.user_id.is_(None),
                                      ~VisitorSession.user_id.in_(staff_ids)))
-    pairs = pairs.distinct().all()
+    day_event_counts = Counter(pairs.all())  # (anon_id, day) -> page views that day
 
-    daily = defaultdict(lambda: {'new': 0, 'returning': 0})
-    for anon_id, day in pairs:
+    daily = defaultdict(lambda: {'new': 0, 'returning': 0, 'bounced': 0})
+    for (anon_id, day), count in day_event_counts.items():
+        if count <= 1:
+            daily[str(day)]['bounced'] += 1
+            continue
         first_day, _ = day_stats_by_id.get(anon_id, (day, 1))
         bucket = 'new' if first_day == day else 'returning'
         daily[str(day)][bucket] += 1
@@ -237,6 +272,10 @@ def _daily_new_vs_returning(days, staff_ids, day_stats_by_id, site=None):
 
 
 SESSION_GAP_MINUTES = 30
+# A single segment can still span many gaps each under SESSION_GAP_MINUTES
+# (e.g. a tab left open, glanced at every ~29 minutes) -- capped here so one
+# such outlier can't dominate the average at this site's traffic volume.
+MAX_SESSION_MINUTES = 60
 
 
 def _session_duration_stats(days, staff_ids, site=None):
@@ -275,11 +314,33 @@ def _session_duration_stats(days, staff_ids, site=None):
         durations.append((seg_last - seg_first).total_seconds() / 60)
 
     if not durations:
-        return {'avg_minutes': 0, 'bounce_rate': 0}
-    non_zero = [d for d in durations if d > 0]
-    avg_minutes = round(sum(non_zero) / len(non_zero), 1) if non_zero else 0
+        return {'avg_minutes': 0, 'avg_minutes_engaged': 0, 'bounce_rate': 0}
+    # Two fixes to a figure that was previously inflated:
+    # 1. A bounce (single-page-view visit) segments to a duration of exactly
+    #    0 above -- these used to be dropped from the average entirely
+    #    (averaging only non-zero durations), which skews the result upward
+    #    by excluding precisely the visits that would pull it down the most.
+    #    They're now counted as 0, same as any other real visit length, in
+    #    `avg_minutes` -- the honest "across every visit" figure.
+    # 2. A session with no further activity for up to SESSION_GAP_MINUTES
+    #    between events is still one segment, so someone glancing back at an
+    #    idle tab every ~29 minutes for hours could register as one
+    #    multi-hour "session" with nothing capping it -- at this site's
+    #    solo-scale traffic volume, one such outlier could swing the whole
+    #    average. Capped at MAX_SESSION_MINUTES, same reasoning as the gap
+    #    cutoff itself: past a certain point this proxy stops being a
+    #    trustworthy measurement anyway.
+    capped = [min(d, MAX_SESSION_MINUTES) for d in durations]
+    avg_minutes = round(sum(capped) / len(capped), 1)
+    # `avg_minutes_engaged`: the OTHER honest question -- among visits that
+    # went past a single page, how long do they tend to last? Answers "when
+    # someone does stick around, how long for", which `avg_minutes` alone
+    # can't -- a near-zero overall average (dominated by a high bounce rate)
+    # would otherwise hide a perfectly healthy engaged-visit length.
+    engaged = [d for d in capped if d > 0]
+    avg_minutes_engaged = round(sum(engaged) / len(engaged), 1) if engaged else 0
     bounce_rate = round(100 * sum(1 for d in durations if d == 0) / len(durations), 1)
-    return {'avg_minutes': avg_minutes, 'bounce_rate': bounce_rate}
+    return {'avg_minutes': avg_minutes, 'avg_minutes_engaged': avg_minutes_engaged, 'bounce_rate': bounce_rate}
 
 
 def _top_paths(days, staff_ids, site=None, limit=10):
@@ -327,9 +388,9 @@ def build_dashboard_payload(site=None):
 
     day_stats_by_id = _visitor_day_stats(site)
     new_vs_returning = {
-        '7d': _new_vs_returning_counts(7, staff_ids, day_stats_by_id, site),
-        '30d': _new_vs_returning_counts(30, staff_ids, day_stats_by_id, site),
-        '90d': _new_vs_returning_counts(90, staff_ids, day_stats_by_id, site),
+        '7d': _new_returning_bounced_counts(7, staff_ids, day_stats_by_id, site),
+        '30d': _new_returning_bounced_counts(30, staff_ids, day_stats_by_id, site),
+        '90d': _new_returning_bounced_counts(90, staff_ids, day_stats_by_id, site),
     }
     daily_new_vs_returning = _daily_new_vs_returning(30, staff_ids, day_stats_by_id, site)
 
