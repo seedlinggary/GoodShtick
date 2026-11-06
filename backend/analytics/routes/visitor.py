@@ -8,12 +8,61 @@ from sqlalchemy import func
 
 from config import cache, db
 from security import super_admin_required, token_optional
-from backend.analytics.modals.visitor import VisitorEvent, VisitorSession
+from backend.analytics.modals.visitor import VisitorEvent, VisitorIpThrottle, VisitorSession
 from backend.user.modals.user import User
 
 analytics_api = Blueprint('analytics_api', __name__, url_prefix='/analytics')
 
 RETENTION_DAYS = 90
+
+# Caps how many BRAND-NEW VisitorSession rows (not total beacon calls) one
+# IP can create per day -- see VisitorIpThrottle's own comment for why this
+# is scoped to new sessions specifically. Generous on purpose: a busy
+# shared IP (office, school, shul WiFi) can easily be dozens of distinct
+# real people in a day; this is here to stop a four-digit flood from one
+# IP, not to police ordinary shared-NAT traffic.
+NEW_SESSION_DAILY_CAP = 60
+
+# Substrings checked against a lowercased User-Agent header to recognize
+# the vast majority of unsophisticated scrapers/bots, which hit a bare
+# JSON beacon endpoint using their library's default UA string rather than
+# bothering to spoof a real browser. Not a security boundary (any bot that
+# sets a normal-looking UA sails right through) -- just enough to stop the
+# analytics dashboard from being polluted by the common case. Matched
+# bots are silently no-op'd (never written to the DB at all), same
+# "ok" response either way so a blocked bot gets no signal to adapt to.
+BOT_UA_SUBSTRINGS = (
+    'bot', 'crawl', 'spider', 'slurp', 'headless', 'phantom', 'puppeteer',
+    'playwright', 'selenium', 'scrapy', 'curl', 'wget', 'python-requests',
+    'python-urllib', 'go-http-client', 'java/', 'libwww-perl', 'axios/',
+    'facebookexternalhit', 'preview', 'monitor', 'uptime', 'pingdom',
+)
+
+
+def _looks_like_bot_ua():
+    ua = (request.headers.get('User-Agent') or '').lower()
+    if not ua:
+        return True  # a real browser always sends one
+    return any(s in ua for s in BOT_UA_SUBSTRINGS)
+
+
+def _check_and_record_new_session(request):
+    """Mirrors check_and_record_guest_submission's shape exactly (see
+    backend/guest/modals/guest_throttle.py) -- True if this IP is still
+    under NEW_SESSION_DAILY_CAP new sessions today (and records one),
+    False if it's already maxed out."""
+    identity = f'ip:{request.remote_addr or "unknown"}'
+    today = datetime.utcnow().date()
+    row = VisitorIpThrottle.query.filter_by(identity=identity, usage_date=today).first()
+    if row is None:
+        row = VisitorIpThrottle(identity=identity, usage_date=today, count=0)
+        db.session.add(row)
+    if row.count >= NEW_SESSION_DAILY_CAP:
+        return False
+    row.count += 1
+    return True
+
+
 # Lazy-cleanup approach (chosen over a vercel.json cron entry): this repo has
 # no cron wiring yet and getting Vercel's cron schema exactly right without
 # being able to verify it against a real deploy is a good way to ship a cron
@@ -91,14 +140,23 @@ def beacon(current_user):
     because any write from localhost, even one flagged and later filtered out
     of the dashboard, was still real dev/test traffic sitting in the
     production table.)
+
+    Two bot defenses, both silent no-ops (never an error response, since a
+    blocked bot should get no signal to adapt to -- it just doesn't land in
+    the DB): an obvious-bot User-Agent (_looks_like_bot_ua) skips writing
+    anything at all, and a brand-new session (this anon_id has never been
+    seen before) is additionally gated by a per-IP daily cap
+    (_check_and_record_new_session) -- see NEW_SESSION_DAILY_CAP's own
+    comment for why only NEW sessions are capped, not every beacon call.
     """
     body = request.get_json(silent=True) or {}
     anon_id = (body.get('anon_id') or '').strip()[:64] or secrets.token_urlsafe(32)
     site = (body.get('site') or '').strip()[:20] or None
 
     is_localhost = _looks_like_localhost()
+    is_bot = _looks_like_bot_ua()
 
-    if not is_localhost:
+    if not is_localhost and not is_bot:
         now = datetime.utcnow()
         country = request.headers.get('x-vercel-ip-country') or None
 
@@ -111,6 +169,9 @@ def beacon(current_user):
             if site and not session_row.site:
                 session_row.site = site
         else:
+            if not _check_and_record_new_session(request):
+                db.session.commit()  # persist the throttle row's own increment/insert
+                return jsonify({'message': 'ok', 'anon_id': anon_id})
             session_row = VisitorSession(
                 anonymous_id=anon_id,
                 user_id=current_user.public_id if current_user else None,

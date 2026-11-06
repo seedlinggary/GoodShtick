@@ -37,6 +37,17 @@ from backend.business.routes.business_lead import lead_api
 from backend.business.routes.business_question import question_api
 from backend.business.routes.business_referral import referral_api
 from backend.business.routes.business_owner_tools import owner_tools_api
+from backend.business.routes.business_site import business_site_api
+from backend.business.routes.business_site_public import business_site_public_api
+from backend.business.routes.site_pages import site_pages_api
+from backend.business.routes.payments import payments_api
+from backend.business.routes.commerce import commerce_api
+from backend.business.routes.booking import booking_api
+from backend.business.routes.crm import crm_api
+from backend.business.routes.invoices import invoices_api
+from backend.business.routes.promo_sync import promo_sync_api
+from backend.business.routes.site_templates import site_templates_api
+from backend.business.routes.site_ai import site_ai_api
 from backend.business.routes.business_feedback import feedback_api
 from backend.business.routes.loyalty_card import loyalty_api
 from backend.business.routes.business_referral_code import referral_code_api
@@ -44,6 +55,17 @@ from backend.business.routes.business_insights import insights_api
 from backend.business.routes.community import community_api
 from backend.business.routes.minyan import minyan_api
 from backend.business.routes.admin_integrations import admin_integrations_api
+from backend.business.routes.nonprofit_staff import nonprofit_staff_api
+from backend.business.routes.nonprofit_public import nonprofit_public_api
+from backend.business.routes.nonprofit_webhook import nonprofit_webhook_api
+from backend.business.routes.nonprofit_audit import nonprofit_audit_api
+from backend.business.routes.nonprofit_donations import nonprofit_donations_api
+from backend.business.routes.nonprofit_followups import nonprofit_followups_api
+from backend.business.routes.nonprofit_families import nonprofit_families_api
+from backend.business.routes.nonprofit_holidays import nonprofit_holidays_api
+from backend.business.routes.nonprofit_forms import nonprofit_forms_api
+from backend.business.routes.nonprofit_dashboard import nonprofit_dashboard_api
+from backend.business.routes.nonprofit_family_portal import nonprofit_family_portal_api
 from backend.estates.routes.estates import estates_api
 from backend.estates.routes.estates_group_buy import group_buy_api
 from backend.marketplace.routes.marketplace import marketplace_api
@@ -104,6 +126,14 @@ from backend.business.modals.business_feedback import BusinessFeedback
 from backend.business.modals.loyalty_card import LoyaltyCard
 from backend.business.modals.business_referral_code import BusinessReferral, BusinessReferralUse
 from backend.business.modals.platform_credential import PlatformCredential
+from backend.business.modals.business_site import BusinessSite
+from backend.business.modals.site_page import SitePage, SitePageVersion
+from backend.business.modals.payment_account import PaymentAccount
+from backend.business.modals.commerce import Product, Order, OrderItem
+from backend.business.modals.booking import ServiceType, AvailabilityRule, Appointment, RecurrenceRule
+from backend.business.modals.customer_note import CustomerNote
+from backend.business.modals.site_template import SiteTemplate
+from backend.business.modals.site_ai_usage import SiteAiUsage
 from backend.estates.modals.estates import (
     EstatesListing, EstatesListingPhoto, EstatesListingLike,
     EstatesGroupBuy, EstatesGroupBuyPhoto, EstatesGroupBuyMember,
@@ -148,11 +178,33 @@ application.register_blueprint(lead_api)
 application.register_blueprint(question_api)
 application.register_blueprint(referral_api)
 application.register_blueprint(owner_tools_api)
+application.register_blueprint(business_site_api)
+application.register_blueprint(business_site_public_api)
+application.register_blueprint(site_pages_api)
+application.register_blueprint(payments_api)
+application.register_blueprint(commerce_api)
+application.register_blueprint(booking_api)
+application.register_blueprint(crm_api)
+application.register_blueprint(invoices_api)
+application.register_blueprint(promo_sync_api)
+application.register_blueprint(site_templates_api)
+application.register_blueprint(site_ai_api)
 application.register_blueprint(feedback_api)
 application.register_blueprint(loyalty_api)
 application.register_blueprint(referral_code_api)
 application.register_blueprint(insights_api)
 application.register_blueprint(admin_integrations_api)
+application.register_blueprint(nonprofit_staff_api)
+application.register_blueprint(nonprofit_public_api)
+application.register_blueprint(nonprofit_webhook_api)
+application.register_blueprint(nonprofit_audit_api)
+application.register_blueprint(nonprofit_donations_api)
+application.register_blueprint(nonprofit_followups_api)
+application.register_blueprint(nonprofit_families_api)
+application.register_blueprint(nonprofit_holidays_api)
+application.register_blueprint(nonprofit_forms_api)
+application.register_blueprint(nonprofit_dashboard_api)
+application.register_blueprint(nonprofit_family_portal_api)
 application.register_blueprint(community_api)
 application.register_blueprint(minyan_api)
 application.register_blueprint(estates_api)

@@ -1,5 +1,35 @@
 from config import db
-from datetime import datetime
+from datetime import date, datetime
+
+
+class VisitorIpThrottle(db.Model):
+    """Per-IP, per-day counter of brand-new VisitorSession rows created via
+    the public /analytics/beacon endpoint -- same (identity, date) bare-
+    counter shape as GuestSubmissionThrottle (backend/guest/modals/
+    guest_throttle.py), used the same way for the same reason (this app
+    runs serverless with pool_size=1, so an in-memory limiter would
+    silently do nothing).
+
+    Deliberately scoped to NEW sessions only, not every beacon call -- a
+    real visitor loading many pages keeps reusing their own anonymous_id,
+    which should never be capped. The actual bot signature this defends
+    against is a scraper that doesn't persist the client-side anonymous_id
+    between requests (or deliberately randomizes it), which looks exactly
+    like a flood of brand-new "unique visitors" from one IP -- that's what
+    this throttle catches."""
+    __tablename__ = 'visitor_ip_throttle'
+
+    id = db.Column(db.Integer, primary_key=True)
+    identity = db.Column(db.String(64), nullable=False, index=True)  # 'ip:<remote_addr>'
+    usage_date = db.Column(db.Date, nullable=False, default=date.today, index=True)
+    count = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+
+    __table_args__ = (
+        db.UniqueConstraint('identity', 'usage_date', name='uq_visitor_ip_throttle_identity_date'),
+    )
+
+    def __repr__(self):
+        return f'VisitorIpThrottle({self.identity} {self.usage_date} x{self.count})'
 
 
 class VisitorSession(db.Model):

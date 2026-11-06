@@ -13,12 +13,15 @@ from backend.business.modals.business import (
     Business, BusinessLocation, BUSINESS_CATEGORIES, FOOD_CATEGORIES, LOCATION_TYPES, slugify,
 )
 from backend.business.modals.business_claim import BusinessClaim
+from backend.business.modals.business_site import BusinessSite
 from backend.business.modals.business_post import BusinessPost
 from backend.business.modals.business_comment import BusinessComment
 from backend.business.schemas.business import make_business_schema, make_comment_schema, ClaimSchema
 from backend.business.schemas.business_post import make_business_post_schema
 from backend.business.social.holidays import auto_closure_reason
 from backend.business.routes.social import maybe_publish_due_posts
+from backend.business.routes.booking import maybe_generate_recurring_appointments
+from backend.business.routes.promo_sync import maybe_generate_promo_posts
 
 RECENT_POSTS_LIMIT = 5
 RECENT_COMMENTS_LIMIT = 10
@@ -266,6 +269,12 @@ def list_businesses(current_user):
     # scheduled time has arrived -- see social.py's maybe_publish_due_posts
     # for why this is opportunistic rather than a real cron job.
     maybe_publish_due_posts()
+    # Same opportunistic-sweep pattern, for the site builder's recurring
+    # bookings -- see booking.py's maybe_generate_recurring_appointments.
+    maybe_generate_recurring_appointments()
+    # Same pattern again, for the site builder's promo-sync bolt-on --
+    # see promo_sync.py's maybe_generate_promo_posts.
+    maybe_generate_promo_posts()
 
     query = Business.query.options(*_feed_options()).filter(Business.approved_to_publish.is_(True))
 
@@ -384,6 +393,22 @@ def list_businesses(current_user):
     return jsonify({'businesses': schema.dump(businesses), 'page': page, 'has_more': has_more, 'total': total})
 
 
+def _business_site_url(business):
+    """Public URL of a business's own Good-Shtick-built site -- None unless
+    it's actually live (published AND, if it set a custom domain, that
+    domain is verified), so BusinessProfile.js only ever shows a "Visit
+    our website" link that actually resolves. A verified custom domain
+    takes priority over the subdomain since that's the address the owner
+    wants shown publicly."""
+    site = getattr(business, 'site', None)
+    if not site or site.status != 'published':
+        return None
+    if site.custom_domain and site.custom_domain_status == 'verified':
+        return f'https://{site.custom_domain}'
+    base = os.environ.get('BUSINESS_SITE_BASE_DOMAIN')
+    return f'https://{site.subdomain}.{base}' if base else None
+
+
 @business_api.route('/businesses/<identifier>', methods=['GET'])
 @token_optional
 def get_business(current_user, identifier):
@@ -394,6 +419,7 @@ def get_business(current_user, identifier):
         return jsonify({'message': 'Business not found'}), 404
     schema = make_business_schema(current_user, many=False, card=False)
     data = schema.dump(business)
+    data['site_url'] = _business_site_url(business)
 
     recent_posts = (BusinessPost.query
                      .filter_by(business_id=business.id, approved_to_publish=True)
@@ -794,6 +820,28 @@ def claim_business(current_user, business_id):
     return jsonify(ClaimSchema().dump(claim)), 201
 
 
+def _owned_sites(owned):
+    """One extra query (not N+1) mapping each owned business to its
+    BusinessSite, if any -- lets MyBusinesses.js show a direct "Manage
+    website" / "View live site" link per business without the profile
+    dropdown or this list otherwise having any way to know a site even
+    exists (previously the only path in was already being inside a
+    specific business's own Manage Tools page and knowing to look for the
+    Site tab there)."""
+    if not owned:
+        return {}
+    base = os.environ.get('BUSINESS_SITE_BASE_DOMAIN')
+    sites = BusinessSite.query.filter(BusinessSite.business_id.in_([b.id for b in owned])).all()
+    return {
+        s.business_id: {
+            'status': s.status,
+            'subdomain': s.subdomain,
+            'url': f'https://{s.subdomain}.{base}' if base else None,
+        }
+        for s in sites
+    }
+
+
 @business_api.route('/my/businesses', methods=['GET'])
 @token_required
 def my_businesses(current_user):
@@ -802,8 +850,13 @@ def my_businesses(current_user):
     claims = BusinessClaim.query.filter_by(user_id=current_user.public_id).order_by(BusinessClaim.created_at.desc()).all()
 
     schema = make_business_schema(current_user, many=True, card=True)
+    owned_dump = schema.dump(owned)
+    sites_by_business = _owned_sites(owned)
+    for row, business in zip(owned_dump, owned):
+        row['site'] = sites_by_business.get(business.id)
+
     return jsonify({
-        'owned': schema.dump(owned),
+        'owned': owned_dump,
         'created': schema.dump(created),
         'claims': ClaimSchema(many=True).dump(claims),
     })
