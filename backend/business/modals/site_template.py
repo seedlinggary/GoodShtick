@@ -25,6 +25,13 @@ class SiteTemplate(db.Model):
 
     theme = db.Column(db.JSON, nullable=True)
     home_sections = db.Column(db.JSON, nullable=False, default=list)
+    # Every one of the original 5 templates was home-page-only -- an owner
+    # applying one got a single built page and had to build About/Services/
+    # Contact themselves from blank pages. extra_pages makes a template a
+    # real complete site: [{slug, title, sections}], created alongside the
+    # home page when applied. Nullable/defaults to empty so the original 5
+    # need no backfill -- they just keep being home-only.
+    extra_pages = db.Column(db.JSON, nullable=True)
     nav_links = db.Column(db.JSON, nullable=True)
     footer_text = db.Column(db.String(300), nullable=True)
 
@@ -38,7 +45,7 @@ class SiteTemplate(db.Model):
     creator = db.relationship('User', foreign_keys=[created_by])
 
     def __init__(self, name, home_sections, description=None, category=None, preview_image=None,
-                 theme=None, nav_links=None, footer_text=None, is_system_default=False,
+                 theme=None, nav_links=None, footer_text=None, extra_pages=None, is_system_default=False,
                  active=True, position=0, created_by=None):
         self.name = name
         self.home_sections = home_sections
@@ -48,6 +55,7 @@ class SiteTemplate(db.Model):
         self.theme = theme
         self.nav_links = nav_links
         self.footer_text = footer_text
+        self.extra_pages = extra_pages
         self.is_system_default = is_system_default
         self.active = active
         self.position = position

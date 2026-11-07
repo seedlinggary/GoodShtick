@@ -84,6 +84,14 @@ BLOCK_TYPES = (
     # framing. Content is {icon, heading, text, colorScheme, headingSize,
     # textSize}.
     'callout',
+    # A row of client logos / press mentions / certification or award
+    # badges, each optionally linking out -- surfaced comparing against
+    # real marketing and nonprofit sites (a client-logo strip, a Charity
+    # Navigator/BBB trust-badge row), which feature_grid can't represent
+    # cleanly since every one of its card styles pairs the icon/image with
+    # a title underneath. Content is {heading, grayscale, items:
+    # [{src, alt, href}]}.
+    'logo_strip',
 )
 
 # ── Theme (Phase 8) ──────────────────────────────────────────────────────
