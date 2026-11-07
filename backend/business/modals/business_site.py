@@ -193,6 +193,11 @@ def validate_theme(theme):
         return f"Unknown footerStyle: {theme['footerStyle']!r}"
     if 'footerDark' in theme and not isinstance(theme['footerDark'], bool):
         return 'footerDark must be true or false'
+    import re as _re2
+    for key in ('footerDarkBg', 'footerDarkText'):
+        val = theme.get(key)
+        if val is not None and not _re2.match(HEX_COLOR_RE_SOURCE, val):
+            return f'{key} must be a hex color like #112233'
     if 'navUppercase' in theme and not isinstance(theme['navUppercase'], bool):
         return 'navUppercase must be true or false'
     if 'footerColumns' in theme and theme['footerColumns'] is not None:
