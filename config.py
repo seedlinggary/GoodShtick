@@ -1,4 +1,5 @@
 import os
+import re
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
 from flask import Flask
@@ -18,6 +19,22 @@ application = Flask(__name__)
 # FRONTEND_ORIGINS: comma-separated list of allowed origins (set in .env)
 _origins_raw = os.environ.get('FRONTEND_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000')
 FRONTEND_ORIGINS = [o.strip() for o in _origins_raw.split(',') if o.strip()]
+
+# Business-owner storefront subdomains (shmuelsbakery.gutcommunity.com, say)
+# can't be enumerated in FRONTEND_ORIGINS above -- a new one can be claimed
+# at any time, long after this deploy's env vars were set, so there's no way
+# to list them all up front the way the rest of FRONTEND_ORIGINS does. A
+# regex origin covers the base domain AND any subdomain of it in one entry
+# instead. flask-cors auto-detects a regex-looking string (one containing
+# chars like ^$()\.) and compiles it itself -- see _resolve_pattern in its
+# own source -- so passing this as a plain string (not a pre-compiled
+# re.Pattern) is enough. Same base domain the frontend's own
+# businessSiteSubdomainFor() (src/siteMode.js) and the backend's own
+# BUSINESS_SITE_BASE_DOMAIN-reading routes already use.
+_business_site_base = os.environ.get('BUSINESS_SITE_BASE_DOMAIN', '').strip()
+if _business_site_base:
+    FRONTEND_ORIGINS.append(rf'^https://([a-z0-9-]+\.)?{re.escape(_business_site_base)}$')
+
 CORS(application, origins=FRONTEND_ORIGINS, supports_credentials=True)
 
 application.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SQLALCHEMY_DATABASE_URI')

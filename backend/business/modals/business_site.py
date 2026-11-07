@@ -25,6 +25,14 @@ MODULE_REGISTRY = {
     # modules above (no products/orders), so it should never silently
     # appear for a business that's actually a regular storefront.
     'nonprofit':        {'label': 'Nonprofit / Donations', 'default_enabled': False},
+    # The nonprofit module's dynamic form builder (conditional fields,
+    # choice/date/name-date-list types, response export), generalized to
+    # any business -- see routes/site_forms.py's own docstring. A
+    # nonprofit business doesn't need to separately turn this on too (its
+    # 'nonprofit' module already includes forms); this is for every OTHER
+    # business that just wants a custom intake/proposal/application form
+    # without the rest of the nonprofit back-office.
+    'custom_forms':     {'label': 'Custom Forms',       'default_enabled': False},
 }
 
 DEFAULT_ENABLED_MODULES = {key: cfg['default_enabled'] for key, cfg in MODULE_REGISTRY.items()}
@@ -50,6 +58,18 @@ BLOCK_TYPES = (
     # seat/dynamic-form flows directly into a built page, not just a
     # fixed /donate-style route the owner has to separately link to.
     'donation_form', 'membership_form', 'holiday_seats_form', 'dynamic_form', 'family_login_button',
+    # Generic, every-site structured-content blocks -- added recreating a
+    # real business's existing site (Altmax Property Management) surfaced
+    # that a services grid / FAQ accordion / testimonial wall had no block
+    # equivalent here at all (only loose text blocks, which lose the
+    # repeating-card structure). Not nonprofit-specific -- any business
+    # site can use these.
+    'faq_accordion', 'feature_grid', 'testimonial_grid',
+    # Owner-entered (not live-fetched -- no Google Places API key/billing
+    # needed), same "update these once the Business Profile is live"
+    # manual convention a real business's own prior site used for this
+    # exact feature. Content is just {rating, review_count, url}.
+    'google_reviews_badge',
 )
 
 # ── Theme (Phase 8) ──────────────────────────────────────────────────────
@@ -68,14 +88,21 @@ THEME_PALETTES = {
     'minimal': {'label': 'Minimal', 'primary': '#1A1A1A', 'secondary': '#6E6E6E', 'background': '#FFFFFF', 'surface': '#FAFAFA', 'text': '#1A1A1A', 'muted': '#9E9E9E', 'border': '#EAEAEA'},
     'earthy':  {'label': 'Earthy',  'primary': '#4A5D3A', 'secondary': '#8C7851', 'background': '#F5F0E6', 'surface': '#FFFFFF', 'text': '#2D2A22', 'muted': '#7A7260', 'border': '#DCD3BE'},
     'dark':    {'label': 'Dark',    'primary': '#7C9EFF', 'secondary': '#B98CE8', 'background': '#121417', 'surface': '#1C1F24', 'text': '#F0F2F5', 'muted': '#9AA3AE', 'border': '#2C3036'},
+    'sunset':  {'label': 'Sunset',  'primary': '#D96C3F', 'secondary': '#F2B872', 'background': '#FFF6ED', 'surface': '#FFFFFF', 'text': '#3A2A1E', 'muted': '#9C7F63', 'border': '#F0DCC4'},
+    'forest':  {'label': 'Forest',  'primary': '#2F6B4F', 'secondary': '#8FBF9B', 'background': '#F1F7F2', 'surface': '#FFFFFF', 'text': '#1E2E24', 'muted': '#6E8C78', 'border': '#D7E8DC'},
+    'rose':    {'label': 'Rose',    'primary': '#B5456E', 'secondary': '#E8A9C0', 'background': '#FDF2F6', 'surface': '#FFFFFF', 'text': '#3A1F2A', 'muted': '#A6748A', 'border': '#F2D9E3'},
+    'slate':   {'label': 'Slate',   'primary': '#475569', 'secondary': '#94A3B8', 'background': '#F1F5F9', 'surface': '#FFFFFF', 'text': '#1E293B', 'muted': '#64748B', 'border': '#E2E8F0'},
 }
 
 FONT_PAIRINGS = {
-    'classic':  {'label': 'Classic',  'heading': "'Playfair Display', Georgia, serif", 'body': "'Lato', Arial, sans-serif", 'google': 'Playfair+Display:wght@700&family=Lato:wght@400;600'},
-    'modern':   {'label': 'Modern',   'heading': "'Poppins', Arial, sans-serif", 'body': "'Inter', Arial, sans-serif", 'google': 'Poppins:wght@600;700&family=Inter:wght@400;600'},
-    'friendly': {'label': 'Friendly', 'heading': "'Quicksand', Arial, sans-serif", 'body': "'Nunito', Arial, sans-serif", 'google': 'Quicksand:wght@700&family=Nunito:wght@400;600'},
-    'elegant':  {'label': 'Elegant',  'heading': "'Cormorant Garamond', Georgia, serif", 'body': "'Work Sans', Arial, sans-serif", 'google': 'Cormorant+Garamond:wght@700&family=Work+Sans:wght@400;600'},
-    'bold':     {'label': 'Bold',     'heading': "'Archivo Black', Arial, sans-serif", 'body': "'Archivo', Arial, sans-serif", 'google': 'Archivo+Black&family=Archivo:wght@400;600'},
+    'classic':   {'label': 'Classic',   'heading': "'Playfair Display', Georgia, serif", 'body': "'Lato', Arial, sans-serif", 'google': 'Playfair+Display:wght@700&family=Lato:wght@400;600'},
+    'modern':    {'label': 'Modern',    'heading': "'Poppins', Arial, sans-serif", 'body': "'Inter', Arial, sans-serif", 'google': 'Poppins:wght@600;700&family=Inter:wght@400;600'},
+    'friendly':  {'label': 'Friendly',  'heading': "'Quicksand', Arial, sans-serif", 'body': "'Nunito', Arial, sans-serif", 'google': 'Quicksand:wght@700&family=Nunito:wght@400;600'},
+    'elegant':   {'label': 'Elegant',   'heading': "'Cormorant Garamond', Georgia, serif", 'body': "'Work Sans', Arial, sans-serif", 'google': 'Cormorant+Garamond:wght@700&family=Work+Sans:wght@400;600'},
+    'bold':      {'label': 'Bold',      'heading': "'Archivo Black', Arial, sans-serif", 'body': "'Archivo', Arial, sans-serif", 'google': 'Archivo+Black&family=Archivo:wght@400;600'},
+    'editorial': {'label': 'Editorial', 'heading': "'Libre Baskerville', Georgia, serif", 'body': "'Source Sans 3', Arial, sans-serif", 'google': 'Libre+Baskerville:wght@700&family=Source+Sans+3:wght@400;600'},
+    'rounded':   {'label': 'Rounded',   'heading': "'Baloo 2', Arial, sans-serif", 'body': "'Mulish', Arial, sans-serif", 'google': 'Baloo+2:wght@700&family=Mulish:wght@400;600'},
+    'technical': {'label': 'Technical', 'heading': "'Space Grotesk', Arial, sans-serif", 'body': "'IBM Plex Sans', Arial, sans-serif", 'google': 'Space+Grotesk:wght@700&family=IBM+Plex+Sans:wght@400;600'},
 }
 
 BUTTON_STYLES = {
@@ -83,6 +110,8 @@ BUTTON_STYLES = {
     'pill':    {'label': 'Pill', 'radius': '999px'},
     'square':  {'label': 'Square', 'radius': '2px'},
     'outline': {'label': 'Outline', 'radius': '8px'},
+    'ghost':   {'label': 'Ghost', 'radius': '8px'},
+    'shadow':  {'label': 'Shadow', 'radius': '10px'},
 }
 
 FORM_STYLES = {
@@ -95,11 +124,13 @@ NAV_STYLES = {
     'top':     {'label': 'Top bar'},
     'side':    {'label': 'Sidebar'},
     'minimal': {'label': 'Minimal (logo only)'},
+    'split':   {'label': 'Split (centered logo)'},
 }
 
 FOOTER_STYLES = {
     'simple':  {'label': 'Simple'},
     'columns': {'label': 'Columns'},
+    'stacked': {'label': 'Stacked (centered, with links)'},
     'none':    {'label': 'No footer'},
 }
 

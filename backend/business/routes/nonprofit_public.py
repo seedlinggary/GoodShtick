@@ -38,6 +38,24 @@ def _site_and_business(subdomain):
     return site, business, config
 
 
+def _site_and_business_for_forms(subdomain):
+    """Same shape as _site_and_business above, but used ONLY by the two
+    form routes below -- the dynamic form builder (NonprofitForm et al.)
+    stopped being nonprofit-exclusive (see backend/business/routes/
+    site_forms.py's own docstring for why: any business can turn on the
+    'custom_forms' module now, same as Products/Bookings/CRM/Invoices).
+    Every OTHER route in this file (donations, memberships, holidays) is
+    still strictly nonprofit-only on purpose -- only this helper accepts
+    either module flag."""
+    site = BusinessSite.query.filter_by(subdomain=(subdomain or '').strip().lower(), status='published').first()
+    if not site or not (site.has_module('nonprofit') or site.has_module('custom_forms')):
+        return None, None
+    business = db.session.get(Business, site.business_id)
+    if not business:
+        return None, None
+    return site, business
+
+
 def _public_site_origin(subdomain):
     """The nonprofit's own public site origin, built directly from
     BUSINESS_SITE_BASE_DOMAIN -- unlike _origin() below (which reflects
@@ -336,7 +354,7 @@ def pay_link_redirect(subdomain, reference_code):
 
 @nonprofit_public_api.route('/<subdomain>/forms/<slug>', methods=['GET'])
 def get_public_form(subdomain, slug):
-    site, business, _config = _site_and_business(subdomain)
+    site, business = _site_and_business_for_forms(subdomain)
     if not site:
         return jsonify({'message': 'Not found'}), 404
     form = NonprofitForm.query.filter_by(business_id=business.id, slug=(slug or '').strip().lower(), is_open=True).first()
@@ -360,7 +378,7 @@ def _public_field(f):
 
 @nonprofit_public_api.route('/<subdomain>/forms/<slug>/responses', methods=['POST'])
 def submit_public_form(subdomain, slug):
-    site, business, _config = _site_and_business(subdomain)
+    site, business = _site_and_business_for_forms(subdomain)
     if not site:
         return jsonify({'message': 'Not found'}), 404
     form = NonprofitForm.query.filter_by(business_id=business.id, slug=(slug or '').strip().lower(), is_open=True).first()

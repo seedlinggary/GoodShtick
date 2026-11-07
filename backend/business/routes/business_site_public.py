@@ -33,6 +33,81 @@ business_site_public_api = Blueprint('business_site_public_api', __name__, url_p
 
 CONTACT_NAME_MAX, CONTACT_MESSAGE_MAX = 150, 2000
 CONTACT_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+# schema.org JSON-LD structured data, auto-generated server-side from the
+# business's own real data (name/address/phone/logo/category, plus the
+# rating from a google_reviews_badge block on THIS page if the owner
+# placed one) -- never owner-authored HTML, so this carries none of the
+# XSS risk a raw-HTML block would (see BLOCK_TYPES's own docstring on why
+# there isn't one). Invisible to visitors; read only by search engines,
+# to produce rich results (star ratings, business info in a knowledge
+# panel) instead of making a crawler guess from visible page text.
+# api/_businessSiteMeta.js injects this verbatim as a <script
+# type="application/ld+json"> tag -- this function returns the complete,
+# ready-to-serialize dict so that Node file has zero business logic of
+# its own to keep in sync here.
+SCHEMA_TYPE_BY_CATEGORY = {
+    'shul': 'PlaceOfWorship', 'kollel': 'PlaceOfWorship', 'mikvah': 'PlaceOfWorship',
+    'nonprofit': 'NGO', 'gemach': 'NGO',
+    'restaurant': 'Restaurant', 'grocery': 'GroceryStore', 'retail': 'Store',
+    'health_beauty': 'HealthAndBeautyBusiness', 'home_services': 'HomeAndConstructionBusiness',
+    'automotive': 'AutomotiveBusiness', 'education': 'EducationalOrganization',
+    'entertainment': 'EntertainmentBusiness', 'attraction': 'TouristAttraction',
+    'professional_services': 'ProfessionalService',
+}
+DEFAULT_SCHEMA_TYPE = 'LocalBusiness'
+
+
+def _rating_block_content(sections):
+    """First google_reviews_badge block's content on this page, or None --
+    there's no site-wide "the" rating to fall back to (a badge is owner-
+    placed per page, like every other block), so a page with none just
+    gets no aggregateRating rather than a guessed/stale one."""
+    for section in sections or []:
+        for block in section.get('blocks', []) or []:
+            if block.get('type') == 'google_reviews_badge':
+                return block.get('content') or {}
+    return None
+
+
+def _structured_data(business, site, sections=None):
+    loc = None
+    if business.locations:
+        loc = next((l for l in business.locations if l.is_primary), business.locations[0])
+
+    data = {
+        '@context': 'https://schema.org',
+        '@type': SCHEMA_TYPE_BY_CATEGORY.get(business.category, DEFAULT_SCHEMA_TYPE),
+        'name': business.name,
+    }
+    if business.logo:
+        data['image'] = get_public_url(business.logo)
+    if business.about:
+        data['description'] = business.about
+    if loc:
+        address = {
+            k: v for k, v in {
+                'streetAddress': loc.address, 'addressLocality': loc.city,
+                'addressRegion': loc.state, 'postalCode': loc.zip_code, 'addressCountry': loc.country,
+            }.items() if v
+        }
+        if address:
+            data['address'] = {'@type': 'PostalAddress', **address}
+        if loc.phone:
+            data['telephone'] = loc.phone
+
+    base = os.environ.get('BUSINESS_SITE_BASE_DOMAIN')
+    if base:
+        data['url'] = f'https://{site.subdomain}.{base}'
+
+    rating = _rating_block_content(sections)
+    if rating and rating.get('rating'):
+        agg = {'@type': 'AggregateRating', 'ratingValue': rating['rating']}
+        if rating.get('reviewCount'):
+            agg['reviewCount'] = rating['reviewCount']
+        data['aggregateRating'] = agg
+
+    return data
 MAX_CART_ITEMS = 25
 MAX_ITEM_QUANTITY = 50
 
@@ -177,6 +252,7 @@ def get_public_page(subdomain, slug):
         },
         'sections': version.sections,
         'enabled_modules': site.enabled_modules or {},
+        'structured_data': _structured_data(business, site, version.sections),
         **_site_chrome(site),
     })
 

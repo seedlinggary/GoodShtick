@@ -40,6 +40,7 @@ from backend.business.routes.business_owner_tools import owner_tools_api
 from backend.business.routes.business_site import business_site_api
 from backend.business.routes.business_site_public import business_site_public_api
 from backend.business.routes.site_pages import site_pages_api
+from backend.business.routes.site_forms import site_forms_api
 from backend.business.routes.payments import payments_api
 from backend.business.routes.commerce import commerce_api
 from backend.business.routes.booking import booking_api
@@ -181,6 +182,7 @@ application.register_blueprint(owner_tools_api)
 application.register_blueprint(business_site_api)
 application.register_blueprint(business_site_public_api)
 application.register_blueprint(site_pages_api)
+application.register_blueprint(site_forms_api)
 application.register_blueprint(payments_api)
 application.register_blueprint(commerce_api)
 application.register_blueprint(booking_api)
