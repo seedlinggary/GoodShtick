@@ -70,6 +70,13 @@ BLOCK_TYPES = (
     # manual convention a real business's own prior site used for this
     # exact feature. Content is just {rating, review_count, url}.
     'google_reviews_badge',
+    # Same real business's actual Services page structured each item with
+    # an icon, a large 01/02/... index, a paragraph, AND a 2-column list
+    # of supporting bullet points -- feature_grid only has one description
+    # string per item, so that page's real bullet content had to be
+    # flattened into a run-on sentence to fit it. Content is
+    # {heading, numbered, items: [{icon, title, description, points[]}]}.
+    'service_list',
 )
 
 # ── Theme (Phase 8) ──────────────────────────────────────────────────────
@@ -137,6 +144,7 @@ FOOTER_STYLES = {
 DEFAULT_THEME = {
     'palette': 'warm', 'customColors': None, 'fontPairing': 'modern',
     'buttonStyle': 'rounded', 'formStyle': 'boxed', 'navStyle': 'top', 'footerStyle': 'simple',
+    'footerDark': False,
 }
 
 CUSTOM_COLOR_KEYS = ('primary', 'secondary', 'background', 'surface', 'text', 'muted', 'border')
@@ -163,6 +171,8 @@ def validate_theme(theme):
         return f"Unknown navStyle: {theme['navStyle']!r}"
     if 'footerStyle' in theme and theme['footerStyle'] not in FOOTER_STYLES:
         return f"Unknown footerStyle: {theme['footerStyle']!r}"
+    if 'footerDark' in theme and not isinstance(theme['footerDark'], bool):
+        return 'footerDark must be true or false'
     custom = theme.get('customColors')
     if custom is not None:
         if not isinstance(custom, dict):
