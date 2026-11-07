@@ -143,6 +143,7 @@ FOOTER_STYLES = {
 
 DEFAULT_THEME = {
     'palette': 'warm', 'customColors': None, 'fontPairing': 'modern',
+    'customFontPairing': None, 'headingColor': None,
     'buttonStyle': 'rounded', 'formStyle': 'boxed', 'navStyle': 'top', 'footerStyle': 'simple',
     'footerDark': False,
 }
@@ -163,6 +164,18 @@ def validate_theme(theme):
         return f"Unknown palette: {theme['palette']!r}"
     if 'fontPairing' in theme and theme['fontPairing'] not in FONT_PAIRINGS:
         return f"Unknown fontPairing: {theme['fontPairing']!r}"
+    custom_fonts = theme.get('customFontPairing')
+    if custom_fonts is not None:
+        if not isinstance(custom_fonts, dict) or not custom_fonts.get('heading') or not custom_fonts.get('body'):
+            return 'customFontPairing must be an object with heading and body CSS font-family strings'
+        for key in ('heading', 'body', 'google'):
+            if key in custom_fonts and custom_fonts[key] is not None and not isinstance(custom_fonts[key], str):
+                return f'customFontPairing.{key} must be a string'
+    heading_color = theme.get('headingColor')
+    if heading_color is not None:
+        import re as _re
+        if not isinstance(heading_color, str) or not _re.match(HEX_COLOR_RE_SOURCE, heading_color):
+            return 'headingColor must be a hex color like #112233'
     if 'buttonStyle' in theme and theme['buttonStyle'] not in BUTTON_STYLES:
         return f"Unknown buttonStyle: {theme['buttonStyle']!r}"
     if 'formStyle' in theme and theme['formStyle'] not in FORM_STYLES:
@@ -173,6 +186,12 @@ def validate_theme(theme):
         return f"Unknown footerStyle: {theme['footerStyle']!r}"
     if 'footerDark' in theme and not isinstance(theme['footerDark'], bool):
         return 'footerDark must be true or false'
+    if 'navUppercase' in theme and not isinstance(theme['navUppercase'], bool):
+        return 'navUppercase must be true or false'
+    if 'footerColumns' in theme and theme['footerColumns'] is not None:
+        cols = theme['footerColumns']
+        if not isinstance(cols, list) or any(not isinstance(c, dict) for c in cols):
+            return 'footerColumns must be a list of {heading, links} objects'
     custom = theme.get('customColors')
     if custom is not None:
         if not isinstance(custom, dict):
