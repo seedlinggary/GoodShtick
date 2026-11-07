@@ -77,6 +77,13 @@ BLOCK_TYPES = (
     # flattened into a run-on sentence to fit it. Content is
     # {heading, numbered, items: [{icon, title, description, points[]}]}.
     'service_list',
+    # A tinted, bordered notice (e.g. "Building emergency? Call ###") --
+    # that same real site's FAQ page has exactly this, and a plain text
+    # block has no border/background/icon at all, so it had to render as
+    # just colored text with none of the "this is a notice" visual
+    # framing. Content is {icon, heading, text, colorScheme, headingSize,
+    # textSize}.
+    'callout',
 )
 
 # ── Theme (Phase 8) ──────────────────────────────────────────────────────
