@@ -18,7 +18,7 @@ import os
 from flask import Blueprint, jsonify, request
 
 from config import db
-from security import token_optional
+from security import token_optional, real_client_ip
 from backend.business.modals.business_site import (
     BLOCK_TYPES, THEME_PALETTES, FONT_PAIRINGS, BUTTON_STYLES, FORM_STYLES,
     NAV_STYLES, FOOTER_STYLES, DEFAULT_THEME, validate_theme,
@@ -81,7 +81,11 @@ def _system_prompt():
 def _caller_identity(current_user):
     if current_user:
         return f'user:{current_user.public_id}'
-    return f'ip:{request.remote_addr or "unknown"}'
+    # real_client_ip(), not request.remote_addr -- see security.py: remote_addr
+    # is constant on this deployment regardless of who's connecting, which
+    # made this a shared 15-generations-per-day cap for every anonymous
+    # caller site-wide instead of per-visitor.
+    return f'ip:{real_client_ip() or "unknown"}'
 
 
 @site_ai_api.route('/site-ai/generate', methods=['POST'])

@@ -7,7 +7,7 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import func
 
 from config import cache, db
-from security import super_admin_required, token_optional
+from security import super_admin_required, token_optional, real_client_ip
 from backend.analytics.modals.visitor import VisitorEvent, VisitorIpThrottle, VisitorSession
 from backend.user.modals.user import User
 
@@ -46,12 +46,14 @@ def _looks_like_bot_ua():
     return any(s in ua for s in BOT_UA_SUBSTRINGS)
 
 
-def _check_and_record_new_session(request):
+def _check_and_record_new_session():
     """Mirrors check_and_record_guest_submission's shape exactly (see
     backend/guest/modals/guest_throttle.py) -- True if this IP is still
     under NEW_SESSION_DAILY_CAP new sessions today (and records one),
-    False if it's already maxed out."""
-    identity = f'ip:{request.remote_addr or "unknown"}'
+    False if it's already maxed out. real_client_ip(), not
+    request.remote_addr -- see that function's own comment; this was the
+    bug that made every NEW visitor site-wide share one daily bucket."""
+    identity = f'ip:{real_client_ip() or "unknown"}'
     today = datetime.utcnow().date()
     row = VisitorIpThrottle.query.filter_by(identity=identity, usage_date=today).first()
     if row is None:
@@ -169,7 +171,7 @@ def beacon(current_user):
             if site and not session_row.site:
                 session_row.site = site
         else:
-            if not _check_and_record_new_session(request):
+            if not _check_and_record_new_session():
                 db.session.commit()  # persist the throttle row's own increment/insert
                 return jsonify({'message': 'ok', 'anon_id': anon_id})
             session_row = VisitorSession(

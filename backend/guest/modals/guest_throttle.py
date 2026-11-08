@@ -1,6 +1,7 @@
 from datetime import date
 
 from config import db
+from security import real_client_ip
 
 # One combined cap across EVERY content type a guest can post to (jobs,
 # listings, businesses, comments, ...), not ten separate per-type caps a
@@ -41,11 +42,13 @@ def check_and_record_guest_submission(request):
     if today's combined cap is already hit for this IP. Call this ONCE,
     right before actually inserting a new guest post/listing/comment row --
     same "check, then commit together" shape as AskGutUsage's own
-    _check_and_increment_usage. request.remote_addr is used as-is (no
-    X-Forwarded-For handling) -- same simple convention the rest of this
-    codebase's few IP checks already use; a soft abuse cap, not meant to be
-    unspoofable."""
-    identity = f'ip:{request.remote_addr or "unknown"}'
+    _check_and_increment_usage. Uses real_client_ip(), not
+    request.remote_addr -- see that function's own comment in security.py:
+    remote_addr is constant on this deployment regardless of who's
+    actually connecting, which made this an 8-submissions-per-DAY cap for
+    the entire site combined, not per visitor, until this fix. Still a
+    soft abuse cap, not meant to be unspoofable."""
+    identity = f'ip:{real_client_ip() or "unknown"}'
     today = date.today()
     row = GuestSubmissionThrottle.query.filter_by(identity=identity, usage_date=today).first()
     if row is None:
