@@ -62,6 +62,17 @@ class VisitorSession(db.Model):
     # sites' home routes are literally '/').
     site = db.Column(db.String(20), nullable=True, index=True)
 
+    # Which business-owner storefront this session is on, when site is
+    # 'business-site' -- every storefront subdomain self-reports that same
+    # generic site id (see siteMode.js's businessSiteDescriptor), so without
+    # this column there'd be no way to tell one owner's traffic apart from
+    # another's. Resolved server-side in beacon() from the subdomain the
+    # frontend sends (BusinessSite.subdomain -> business_id), not trusted
+    # from the client directly. Loose reference (no FK) to Business.id,
+    # same reasoning as VisitorEvent.business_id below. Null for every
+    # non-storefront session.
+    business_id = db.Column(db.Integer, nullable=True, index=True)
+
     def __repr__(self):
         return f'<VisitorSession {self.anonymous_id[:8]}... user={self.user_id}>'
 
