@@ -33,6 +33,14 @@ business_site_public_api = Blueprint('business_site_public_api', __name__, url_p
 
 CONTACT_NAME_MAX, CONTACT_MESSAGE_MAX = 150, 2000
 CONTACT_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+# The Contact form block's own fields (ContactFormBlock.js / BlockInspector.js)
+# are now owner-editable -- any label beyond the always-required name/email,
+# each optionally required -- so the server can no longer assume a single
+# fixed "message" field. CONTACT_EXTRA_MAX/_LABEL_MAX/_VALUE_MAX cap that
+# list the same way CONTACT_NAME_MAX/CONTACT_MESSAGE_MAX always capped the
+# one fixed field, so an owner-authored form (or a crafted request) can't
+# balloon a notification/email arbitrarily.
+CONTACT_EXTRA_MAX, CONTACT_EXTRA_LABEL_MAX, CONTACT_EXTRA_VALUE_MAX = 10, 80, CONTACT_MESSAGE_MAX
 
 # schema.org JSON-LD structured data, auto-generated server-side from the
 # business's own real data (name/address/phone/logo/category, plus the
@@ -307,7 +315,17 @@ def submit_site_contact(subdomain):
     being tested, super-admin-only for now) Leads feature on
     business_lead.py -- this needs to actually work for a real anonymous
     visitor today. Delivery is the in-app Notification (always works) plus
-    a best-effort email if the owner has one on file."""
+    a best-effort email if the owner has one on file.
+
+    name/email stay structurally required here (there's no way to notify
+    "someone" or reply to no address), but everything past them is now a
+    free-form `extra` list of {label, value} pairs -- the owner's own
+    field list (BlockInspector.js), each independently optional, instead
+    of one fixed, always-required `message` string. `message` is still
+    read directly too, purely for backward compatibility with a block
+    saved before this change (or a request from a stale frontend bundle
+    mid-deploy) -- folded into the same extra list rather than handled
+    separately."""
     site, business = _published_site_and_business(subdomain)
     if not site or not site.has_module('pages'):
         return jsonify({'message': 'Site not found'}), 404
@@ -320,14 +338,31 @@ def submit_site_contact(subdomain):
     body = request.get_json() or {}
     name = (body.get('name') or '').strip()
     email = (body.get('email') or '').strip()
-    message = (body.get('message') or '').strip()
 
     if not name or len(name) > CONTACT_NAME_MAX:
         return jsonify({'message': f'Name is required (max {CONTACT_NAME_MAX} characters)'}), 400
     if not email or not CONTACT_EMAIL_RE.match(email):
         return jsonify({'message': 'A valid email is required'}), 400
-    if not message or len(message) > CONTACT_MESSAGE_MAX:
-        return jsonify({'message': f'Message is required (max {CONTACT_MESSAGE_MAX} characters)'}), 400
+
+    extra = body.get('extra')
+    extra_lines = []
+    if isinstance(extra, list):
+        for item in extra[:CONTACT_EXTRA_MAX]:
+            if not isinstance(item, dict):
+                continue
+            label = (item.get('label') or '').strip()[:CONTACT_EXTRA_LABEL_MAX]
+            value = (item.get('value') or '').strip()[:CONTACT_EXTRA_VALUE_MAX]
+            if label and value:
+                extra_lines.append(f'{label}: {value}')
+
+    legacy_message = (body.get('message') or '').strip()[:CONTACT_MESSAGE_MAX]
+    if legacy_message:
+        extra_lines.insert(0, f'Message: {legacy_message}')
+
+    if not extra_lines:
+        return jsonify({'message': 'Please fill in at least one field below your contact info'}), 400
+
+    message = '\n'.join(extra_lines)
 
     notify(business.owner_user_id, f"New message from {name} via your site",
            type='site_contact_form', link=f'/business/{business.slug}/tools')
