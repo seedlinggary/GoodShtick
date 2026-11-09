@@ -24,12 +24,29 @@ SLUG_RE = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$')
 MAX_SECTIONS = 40
 MAX_BLOCKS_PER_SECTION = 60
 TITLE_MAX = 150
-# src/siteMode.js matches /cart and /order/:orderId/confirmation BEFORE the
-# generic /:slug catch-all for a business's own pages -- a page slug of
-# "cart" or "order" would never actually be reachable, just silently
-# shadowed by the storefront's own fixed routes, which would look like a
-# bug in this feature rather than a naming collision with a different one.
-RESERVED_PAGE_SLUGS = {'cart', 'order'}
+# Every single-path-segment route that would silently shadow a page at
+# that slug, confirmed live for 'about' (a business's own About page,
+# always showing Gut Shtick's corporate one instead -- see App.js) before
+# that got fixed by excluding business-site hosts from those 4 routes.
+# 'about'/'contact'/'disclaimer'/'content-guidelines' are deliberately NOT
+# here -- that fix means a business's own page at those slugs is exactly
+# what resolves now, so they're free to use. Two groups still ARE real
+# collisions, for two different reasons:
+#  - src/siteMode.js's businessSiteDescriptor() matches these BEFORE the
+#    generic /:slug catch-all for a business's own pages, same reasoning
+#    the original 'cart'/'order' entries already had.
+#  - These are genuinely platform-wide account/admin features (sign in/up,
+#    profile, alerts, cross-site search, the admin dashboards) that must
+#    keep working identically no matter which host a visitor is on -- App.js
+#    intentionally does NOT exclude business-site hosts from them the way
+#    it does for the 4 content pages above, so a page at one of these
+#    slugs would be unreachable the exact same way 'about' was.
+RESERVED_PAGE_SLUGS = {
+    # businessSiteDescriptor()'s own fixed routes
+    'cart', 'order', 'donate', 'membership', 'holidays', 'forms', 'pay', 'family-portal', 'staff',
+    # platform-wide account/admin routes, still unconditionally shared (App.js)
+    'signin', 'signup', 'forgotpassword', 'profile', 'alerts', 'my-feed', 'search', 'admin', 'superadmin',
+}
 
 
 # TEMPORARY, prod-testing-only restriction -- see business_site.py's
@@ -146,7 +163,7 @@ def create_site_page(current_user, business_id):
     if not SLUG_RE.match(slug):
         return jsonify({'message': 'slug must be lowercase letters, numbers, and hyphens only'}), 400
     if slug in RESERVED_PAGE_SLUGS:
-        return jsonify({'message': f'"{slug}" is reserved for your site\'s cart/checkout -- pick a different slug'}), 400
+        return jsonify({'message': f'"{slug}" is reserved for a fixed page on your site or across the whole platform -- pick a different slug'}), 400
     if SitePage.query.filter_by(business_site_id=site.id, slug=slug).first():
         return jsonify({'message': 'A page with that slug already exists on this site'}), 409
 
@@ -191,7 +208,7 @@ def update_page(current_user, page_id):
         if not SLUG_RE.match(slug):
             return jsonify({'message': 'slug must be lowercase letters, numbers, and hyphens only'}), 400
         if slug in RESERVED_PAGE_SLUGS:
-            return jsonify({'message': f'"{slug}" is reserved for your site\'s cart/checkout -- pick a different slug'}), 400
+            return jsonify({'message': f'"{slug}" is reserved for a fixed page on your site or across the whole platform -- pick a different slug'}), 400
         existing = SitePage.query.filter_by(business_site_id=page.business_site_id, slug=slug).first()
         if existing and existing.id != page.id:
             return jsonify({'message': 'A page with that slug already exists on this site'}), 409
