@@ -14,6 +14,7 @@ from flask import Blueprint, jsonify, request
 
 from config import db
 from security import token_required
+from backend.business.color_utils import resolve_bg_var
 from backend.business.modals.business import Business
 from backend.business.modals.business_site import BusinessSite, BLOCK_TYPES
 from backend.business.modals.site_page import SitePage, SitePageVersion
@@ -298,6 +299,47 @@ def unpublish_page(current_user, page_id):
     page.status = 'draft'
     db.session.commit()
     return jsonify(_serialize_page(page))
+
+
+@site_pages_api.route('/businesses/<int:business_id>/site/reset-section-colors', methods=['POST'])
+@token_required
+def reset_section_colors(current_user, business_id):
+    """Rewrites every page's current draft so any section background
+    that's a literal, frozen hex (set by an applied template, or by
+    manually picking a solid color) instead references the live theme's
+    own CSS variable -- the same resolve_bg_var() now used when a template
+    is first applied (see site_template_layout.py's compile_section), so a
+    palette change afterward actually moves these too, not just buttons.
+    Draft-only, same as every other edit in this builder: saves a new
+    SitePageVersion per changed page, but never auto-publishes -- Publish
+    each page once you're happy with how it looks."""
+    business, site, err = _owned_site_or_error(business_id, current_user)
+    if err:
+        return err
+
+    pages_changed = 0
+    sections_changed = 0
+    for page in SitePage.query.filter_by(business_site_id=site.id).all():
+        latest = page.versions[0] if page.versions else None
+        if not latest:
+            continue
+        new_sections = []
+        page_touched = False
+        for section in latest.sections or []:
+            bg = (section.get('background') or {})
+            if bg.get('type') == 'color':
+                resolved = resolve_bg_var(bg.get('value'))
+                if resolved != bg.get('value'):
+                    section = {**section, 'background': {**bg, 'value': resolved}}
+                    page_touched = True
+                    sections_changed += 1
+            new_sections.append(section)
+        if page_touched:
+            db.session.add(SitePageVersion(page_id=page.id, sections=new_sections, created_by=current_user.public_id))
+            pages_changed += 1
+
+    db.session.commit()
+    return jsonify({'pages_changed': pages_changed, 'sections_changed': sections_changed})
 
 
 @site_pages_api.route('/site-pages/<int:page_id>', methods=['DELETE'])

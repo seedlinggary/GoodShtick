@@ -13,6 +13,8 @@
 # renders it.
 import math
 
+from backend.business.color_utils import resolve_bg_var
+
 SECTION_WIDTH_PX = 1012
 MIN_SECTION_HEIGHT = 200
 BOTTOM_MARGIN_PX = 28
@@ -417,7 +419,11 @@ def compile_section(section_id, blocks, bg=None, dark_bg=False, padding=48):
             'y': round((y_px / total_height_px) * 100, 2),
             'h': round((h_px / total_height_px) * 100, 2),
         })
-    background = {'type': 'color', 'value': bg} if bg else {'type': 'color', 'value': 'transparent'}
+    # resolve_bg_var maps the literal hex chosen at template-authoring
+    # time to the matching `var(--sb-*)` CSS variable, so a template's
+    # sections keep tracking the live palette the same way a button
+    # already does -- see color_utils.py's own docstring for why.
+    background = {'type': 'color', 'value': resolve_bg_var(bg)}
     return {
         'id': section_id, 'background': background,
         'padding': {'top': padding, 'bottom': padding},
