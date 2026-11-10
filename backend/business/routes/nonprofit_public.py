@@ -16,8 +16,8 @@ from backend.business.modals.business import Business
 from backend.business.modals.business_site import BusinessSite
 from backend.business.modals.nonprofit import (
     NonprofitDonation, NonprofitMembership, NonprofitPaymentLink, NonprofitHoliday,
-    NonprofitBill, NonprofitSignup, NonprofitForm, NonprofitFormResponse,
-    NonprofitPaymentConfig, MEMBERSHIP_TIERS,
+    NonprofitHolidayTier, NonprofitBill, NonprofitSignup, NonprofitForm, NonprofitFormResponse,
+    NonprofitPaymentConfig, get_membership_tiers, is_membership_open, is_donations_open,
 )
 from backend.business.nonprofit_payments.nedarim import build_payment_link, build_recurring_payment_link
 from backend.business.nonprofit_billid import new_reference_code as _new_reference_code
@@ -89,6 +89,14 @@ def _throttle_or_error():
     return None
 
 
+@nonprofit_public_api.route('/<subdomain>/donate-status', methods=['GET'])
+def donate_status(subdomain):
+    site, business, _config = _site_and_business(subdomain)
+    if not site:
+        return jsonify({'message': 'Not found'}), 404
+    return jsonify({'is_open': is_donations_open(business)})
+
+
 @nonprofit_public_api.route('/<subdomain>/donate', methods=['POST'])
 def submit_donation(subdomain):
     site, business, config = _site_and_business(subdomain)
@@ -96,6 +104,8 @@ def submit_donation(subdomain):
         return jsonify({'message': 'Not found'}), 404
     if not config or not config.is_configured:
         return jsonify({'message': 'Online giving is not set up yet for this organization'}), 400
+    if not is_donations_open(business):
+        return jsonify({'message': 'This organization is not accepting online donations right now'}), 400
 
     throttled = _throttle_or_error()
     if throttled:
@@ -136,6 +146,15 @@ def submit_donation(subdomain):
     return jsonify({'reference_code': donation.reference_code, 'payment_url': link}), 201
 
 
+@nonprofit_public_api.route('/<subdomain>/membership-tiers', methods=['GET'])
+def list_public_membership_tiers(subdomain):
+    site, business, _config = _site_and_business(subdomain)
+    if not site:
+        return jsonify({'message': 'Not found'}), 404
+    tiers = [t for t in get_membership_tiers(business) if not t.get('archived')]
+    return jsonify({'tiers': tiers, 'is_open': is_membership_open(business)})
+
+
 @nonprofit_public_api.route('/<subdomain>/membership', methods=['POST'])
 def submit_membership(subdomain):
     site, business, config = _site_and_business(subdomain)
@@ -143,6 +162,8 @@ def submit_membership(subdomain):
         return jsonify({'message': 'Not found'}), 404
     if not config or not config.is_configured:
         return jsonify({'message': 'Online membership payments are not set up yet for this organization'}), 400
+    if not is_membership_open(business):
+        return jsonify({'message': 'This organization is not accepting new members online right now'}), 400
 
     throttled = _throttle_or_error()
     if throttled:
@@ -156,21 +177,19 @@ def submit_membership(subdomain):
     phone = (body.get('phone') or '').strip() or None
     address = (body.get('address') or '').strip() or None
     city = (body.get('city') or '').strip() or None
-    tier = body.get('tier') or 'associate'
+    tier_id = body.get('tier')
 
     if not full_name or not email or '@' not in email:
         return jsonify({'message': 'A name and valid email are required'}), 400
-    if tier not in MEMBERSHIP_TIERS:
-        return jsonify({'message': f'tier must be one of {MEMBERSHIP_TIERS}'}), 400
 
-    prices = _membership_prices(business.id)
-    monthly_cents = prices.get(tier)
-    if not monthly_cents:
-        return jsonify({'message': 'Membership pricing is not configured yet'}), 400
+    tier = next((t for t in get_membership_tiers(business) if t['id'] == tier_id and not t.get('archived')), None)
+    if not tier:
+        return jsonify({'message': 'Choose a valid membership tier'}), 400
+    monthly_cents = tier['monthly_cents']
 
     membership = NonprofitMembership(
         business_id=business.id, reference_code=_new_reference_code(), full_name=full_name,
-        email=email, tier=tier, monthly_cents=monthly_cents, phone=phone, address=address, city=city,
+        email=email, tier=tier['id'], monthly_cents=monthly_cents, phone=phone, address=address, city=city,
     )
     db.session.add(membership)
     db.session.commit()
@@ -179,24 +198,9 @@ def submit_membership(subdomain):
     redirect_url = f'{_origin(subdomain)}/pay/thank-you?membership={membership.reference_code}'
     link = build_recurring_payment_link(
         config.mosad_id, membership.id, monthly_cents, full_name, redirect_url,
-        phone=phone, email=email, street=address, city=city, groupe=tier,
+        phone=phone, email=email, street=address, city=city, groupe=tier['label'],
     )
     return jsonify({'reference_code': membership.reference_code, 'payment_url': link}), 201
-
-
-def _membership_prices(business_id):
-    """Fixed per-business pricing, stored on the Business's own
-    `attributes` JSON catch-all (same convention Business already uses
-    for small per-business config -- no new table needed for two numbers).
-    Falls back to the ported system's own default prices (associate
-    ₪100/mo, full ₪200/mo) if the owner hasn't set their own yet."""
-    business = db.session.get(Business, business_id)
-    attrs = (business.attributes or {}) if business else {}
-    configured = attrs.get('nonprofit_membership_prices_cents') or {}
-    return {
-        'associate': configured.get('associate', 10000),
-        'full': configured.get('full', 20000),
-    }
 
 
 @nonprofit_public_api.route('/<subdomain>/holidays', methods=['GET'])
@@ -205,14 +209,18 @@ def list_public_holidays(subdomain):
     if not site:
         return jsonify({'message': 'Not found'}), 404
     rows = NonprofitHoliday.query.filter_by(business_id=business.id, is_open=True).order_by(NonprofitHoliday.id).all()
-    return jsonify({'holidays': [_public_holiday(h) for h in rows]})
+    # Only holidays that still have at least one active tier are worth
+    # showing -- an event whose owner archived every tier (or never added
+    # one) has nothing a visitor could actually buy.
+    return jsonify({'holidays': [_public_holiday(h) for h in rows if any(not t.archived_at for t in h.tiers)]})
 
 
 def _public_holiday(h):
     return {
         'id': h.id, 'slug': h.slug, 'name_en': h.name_en, 'name_he': h.name_he,
         'description_en': h.description_en, 'description_he': h.description_he,
-        'member_price_cents': h.member_price_cents, 'non_member_price_cents': h.non_member_price_cents,
+        'tiers': [{'id': t.id, 'label': t.label, 'price_cents': t.price_cents}
+                  for t in h.tiers if not t.archived_at],
     }
 
 
@@ -234,21 +242,25 @@ def submit_holiday_seats(subdomain):
     full_name = (body.get('full_name') or '').strip()
     phone = (body.get('phone') or '').strip()
     email = (body.get('email') or '').strip().lower() or None
-    is_member = bool(body.get('is_member'))
     notes = (body.get('notes') or '').strip() or None
-    items = body.get('items') or []  # [{holiday_id, men_seats, women_seats}]
+    items = body.get('items') or []  # [{holiday_id, seats: {tier_id: count}}]
 
     if not full_name or not phone:
         return jsonify({'message': 'Name and phone are required'}), 400
     if not isinstance(items, list) or not items:
         return jsonify({'message': 'Select at least one holiday'}), 400
 
-    # Re-validate server-side -- a holiday could have closed between page
-    # load and submit. Closed/unknown holidays are silently dropped, not
-    # an error, same as the ported system's own createBill.
+    # Re-validate server-side -- a holiday/tier could have closed between
+    # page load and submit. Closed/unknown holidays and tiers are
+    # silently dropped, not an error, same as the ported system's own
+    # createBill. `is_member` no longer drives pricing (tiers do), but the
+    # bill still records it for the family/membership context elsewhere
+    # (exports, family portal) -- best-effort true if ANY seat was bought
+    # on a tier whose label looks like a member tier isn't reliable, so
+    # it's just left false; staff can set it by hand if needed.
     bill = NonprofitBill(
         business_id=business.id, reference_code=_new_reference_code(), full_name=full_name,
-        phone=phone, email=email, is_member=is_member, notes=notes,
+        phone=phone, email=email, is_member=False, notes=notes,
     )
     db.session.add(bill)
     db.session.flush()
@@ -259,12 +271,25 @@ def submit_holiday_seats(subdomain):
         holiday = NonprofitHoliday.query.filter_by(id=item.get('holiday_id'), business_id=business.id, is_open=True).first()
         if not holiday:
             continue
-        men = max(0, int(item.get('men_seats') or 0))
-        women = max(0, int(item.get('women_seats') or 0))
-        if men + women <= 0:
+        seats = item.get('seats') or {}
+        if not isinstance(seats, dict):
             continue
-        line_total = holiday.price_for(is_member) * (men + women)
-        signup = NonprofitSignup(bill_id=bill.id, holiday_id=holiday.id, men_seats=men, women_seats=women, total_cents=line_total)
+        active_tiers = {t.id: t for t in holiday.tiers if not t.archived_at}
+        breakdown = {}
+        line_total = 0
+        for tier_id_raw, count_raw in seats.items():
+            try:
+                tier_id, count = int(tier_id_raw), max(0, int(count_raw or 0))
+            except (TypeError, ValueError):
+                continue
+            tier = active_tiers.get(tier_id)
+            if not tier or count <= 0:
+                continue
+            breakdown[str(tier_id)] = count
+            line_total += tier.price_cents * count
+        if line_total <= 0:
+            continue
+        signup = NonprofitSignup(bill_id=bill.id, holiday_id=holiday.id, total_cents=line_total, seat_breakdown=breakdown)
         db.session.add(signup)
         total_cents += line_total
         names.append(holiday.name_en)

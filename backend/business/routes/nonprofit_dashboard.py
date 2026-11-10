@@ -9,7 +9,8 @@ from backend.business.modals.business import Business
 from backend.business.modals.business_site import BusinessSite
 from backend.business.modals.nonprofit import (
     NonprofitPaymentConfig, NonprofitDonation, NonprofitMembership,
-    NonprofitPaymentFollowUp, NonprofitExternalTransaction, MEMBERSHIP_TIERS,
+    NonprofitPaymentFollowUp, NonprofitExternalTransaction,
+    get_membership_tiers, is_membership_open, is_donations_open,
 )
 from backend.business.nonprofit_auth import staff_required, superadmin_required
 
@@ -107,23 +108,36 @@ def update_payment_config(staff, business_id):
     })
 
 
-@nonprofit_dashboard_api.route('/businesses/<int:business_id>/membership-prices', methods=['GET'])
+def _new_tier_id(existing):
+    """A short, stable, never-reused slug -- stays meaningful in old
+    NonprofitMembership.tier values even after the tier is renamed, so it
+    can't just be re-derived from the current label."""
+    n = len(existing) + 1
+    while True:
+        candidate = f'tier-{n}'
+        if not any(t['id'] == candidate for t in existing):
+            return candidate
+        n += 1
+
+
+@nonprofit_dashboard_api.route('/businesses/<int:business_id>/membership-tiers', methods=['GET'])
 @staff_required
-def get_membership_prices(staff, business_id):
+def get_membership_tiers_route(staff, business_id):
     err = _check_business(staff, business_id)
     if err:
         return err
     business = db.session.get(Business, business_id)
-    configured = ((business.attributes or {}).get('nonprofit_membership_prices_cents') or {}) if business else {}
-    return jsonify({
-        'associate': configured.get('associate', 10000),
-        'full': configured.get('full', 20000),
-    })
+    return jsonify({'tiers': get_membership_tiers(business), 'is_open': is_membership_open(business)})
 
 
-@nonprofit_dashboard_api.route('/businesses/<int:business_id>/membership-prices', methods=['PATCH'])
+@nonprofit_dashboard_api.route('/businesses/<int:business_id>/membership-tiers', methods=['PATCH'])
 @superadmin_required
-def update_membership_prices(staff, business_id):
+def update_membership_tiers_route(staff, business_id):
+    """Replaces the whole tier list (add/edit/archive/reorder all happen
+    client-side on the full list, then it's saved back in one call -- same
+    shape as every other owner-editable list in this codebase, e.g.
+    site_pages.py's page reordering). `is_open` is optional and, when
+    given, is saved alongside in the same request."""
     err = _check_business(staff, business_id)
     if err:
         return err
@@ -133,17 +147,66 @@ def update_membership_prices(staff, business_id):
 
     body = request.get_json() or {}
     attrs = dict(business.attributes or {})
-    prices = dict(attrs.get('nonprofit_membership_prices_cents') or {})
-    for tier in MEMBERSHIP_TIERS:
-        if tier in body:
+
+    if 'tiers' in body:
+        tiers_in = body['tiers']
+        if not isinstance(tiers_in, list) or len(tiers_in) > 20:
+            return jsonify({'message': 'tiers must be a list of at most 20 items'}), 400
+        existing = get_membership_tiers(business)
+        cleaned = []
+        for t in tiers_in:
+            if not isinstance(t, dict):
+                return jsonify({'message': 'Each tier must be an object'}), 400
+            label = (t.get('label') or '').strip()
+            if not label:
+                return jsonify({'message': 'Each tier needs a label'}), 400
             try:
-                prices[tier] = int(body[tier])
+                monthly_cents = int(t.get('monthly_cents'))
             except (TypeError, ValueError):
-                return jsonify({'message': f'{tier} must be an integer'}), 400
-    attrs['nonprofit_membership_prices_cents'] = prices
+                return jsonify({'message': f'"{label}" needs a valid monthly price'}), 400
+            if monthly_cents <= 0:
+                return jsonify({'message': f'"{label}" needs a monthly price greater than 0'}), 400
+            tier_id = t.get('id')
+            if not tier_id or not any(existing_t['id'] == tier_id for existing_t in existing):
+                tier_id = _new_tier_id(cleaned + existing)
+            cleaned.append({'id': tier_id, 'label': label, 'monthly_cents': monthly_cents, 'archived': bool(t.get('archived'))})
+        if not any(not t['archived'] for t in cleaned):
+            return jsonify({'message': 'At least one tier must be active'}), 400
+        attrs['nonprofit_membership_tiers'] = cleaned
+
+    if 'is_open' in body:
+        attrs['nonprofit_membership_open'] = bool(body['is_open'])
+
     business.attributes = attrs
     db.session.commit()
-    return jsonify(prices)
+    return jsonify({'tiers': get_membership_tiers(business), 'is_open': is_membership_open(business)})
+
+
+@nonprofit_dashboard_api.route('/businesses/<int:business_id>/donate-open', methods=['GET'])
+@staff_required
+def get_donate_open(staff, business_id):
+    err = _check_business(staff, business_id)
+    if err:
+        return err
+    business = db.session.get(Business, business_id)
+    return jsonify({'is_open': is_donations_open(business)})
+
+
+@nonprofit_dashboard_api.route('/businesses/<int:business_id>/donate-open', methods=['PATCH'])
+@superadmin_required
+def update_donate_open(staff, business_id):
+    err = _check_business(staff, business_id)
+    if err:
+        return err
+    business = db.session.get(Business, business_id)
+    if not business:
+        return jsonify({'message': 'Business not found'}), 404
+    body = request.get_json() or {}
+    attrs = dict(business.attributes or {})
+    attrs['nonprofit_donate_open'] = bool(body.get('is_open', True))
+    business.attributes = attrs
+    db.session.commit()
+    return jsonify({'is_open': is_donations_open(business)})
 
 
 @nonprofit_dashboard_api.route('/businesses/<int:business_id>/dashboard', methods=['GET'])

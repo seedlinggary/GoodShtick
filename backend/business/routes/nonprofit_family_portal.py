@@ -161,11 +161,25 @@ def _payable(type_label, row, amount_field):
     }
 
 
+def _seat_summary(s):
+    """A plain {label: count} map a family member can read, from
+    whichever shape this signup actually has -- tiered (seat_breakdown,
+    resolved to each tier's current label) or legacy (men/women seats)."""
+    if s.seat_breakdown:
+        tiers_by_id = {t.id: t.label for t in s.holiday.tiers}
+        return {tiers_by_id.get(int(tid), f'Tier #{tid}'): count for tid, count in s.seat_breakdown.items() if count}
+    summary = {}
+    if s.men_seats:
+        summary['Men'] = s.men_seats
+    if s.women_seats:
+        summary['Women'] = s.women_seats
+    return summary
+
+
 def _serialize_bill(bill):
     data = _payable('holiday_seats', bill, 'total_cents')
     data['holidays'] = [
-        {'name_en': s.holiday.name_en, 'name_he': s.holiday.name_he, 'men_seats': s.men_seats,
-         'women_seats': s.women_seats, 'total_cents': s.total_cents}
+        {'name_en': s.holiday.name_en, 'name_he': s.holiday.name_he, 'seats': _seat_summary(s), 'total_cents': s.total_cents}
         for s in bill.line_items if not s.deleted_at
     ]
     return data

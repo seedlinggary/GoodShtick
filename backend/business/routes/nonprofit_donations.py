@@ -16,7 +16,7 @@ from flask import Blueprint, jsonify, request
 from config import db
 from backend.business.modals.nonprofit import (
     NonprofitDonation, NonprofitMembership, NonprofitPaymentLink, NonprofitTransaction,
-    NonprofitPaymentConfig, MEMBERSHIP_TIERS,
+    NonprofitPaymentConfig,
 )
 from backend.business.nonprofit_auth import staff_required, superadmin_required
 from backend.business.nonprofit_billid import new_reference_code
@@ -223,9 +223,15 @@ def override_membership(staff, membership_id):
         if field in body:
             setattr(membership, field, body[field])
     if 'tier' in body:
-        if body['tier'] not in MEMBERSHIP_TIERS:
-            return jsonify({'message': f'tier must be one of {MEMBERSHIP_TIERS}'}), 400
-        membership.tier = body['tier']
+        # Not validated against the current tier list on purpose -- this
+        # is a freehand staff override of an EXISTING record (same as
+        # monthly_cents right below, which isn't cross-checked against
+        # any tier's price either), and may need to record a tier that
+        # has since been renamed or archived for historical accuracy.
+        tier = (body['tier'] or '').strip()
+        if not tier:
+            return jsonify({'message': 'tier cannot be empty'}), 400
+        membership.tier = tier
     if 'monthly_cents' in body:
         try:
             membership.monthly_cents = int(body['monthly_cents'])

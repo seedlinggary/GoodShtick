@@ -31,7 +31,6 @@ from config import db
 NONPROFIT_STAFF_ROLES = ('staff', 'superadmin')
 
 BILL_STATUSES = ('pending', 'paid', 'cancelled')
-MEMBERSHIP_TIERS = ('associate', 'full')
 MEMBERSHIP_STATUSES = ('pending', 'active', 'past_due', 'cancelled')
 FOLLOWUP_REASONS = ('stale_pending', 'manual', 'failure_email', 'api_decline')
 FOLLOWUP_STATUSES = ('open', 'email_sent', 'resolved', 'dismissed')
@@ -40,6 +39,39 @@ FORM_FIELD_TYPES = (
     'single_choice', 'multi_choice', 'multi_text', 'name_date_list',
 )
 FIELD_CONDITION_MODES = ('show_if', 'hide_if')
+
+# Membership tiers are owner-defined, not a fixed code-level tuple -- an
+# arbitrary list of {id, label, monthly_cents, archived} kept on the
+# Business's own `attributes` JSON catch-all (same place/convention
+# per-business membership pricing already lived before this, just
+# generalized from a fixed {associate, full} dict to a real list so an
+# owner can have any number of tiers with any names). `id` is a slug
+# generated once at creation and never reused, so it keeps meaning the
+# same thing in old NonprofitMembership.tier values (a plain free-text
+# column, never DB-constrained) even after the tier is later renamed or
+# archived. Falls back to the two tiers this module originally shipped
+# with, so a business that never touched this setting keeps working
+# exactly as before.
+DEFAULT_MEMBERSHIP_TIERS = [
+    {'id': 'associate', 'label': 'Associate Member', 'monthly_cents': 10000, 'archived': False},
+    {'id': 'full', 'label': 'Full Member', 'monthly_cents': 20000, 'archived': False},
+]
+
+
+def get_membership_tiers(business):
+    attrs = (business.attributes or {}) if business else {}
+    tiers = attrs.get('nonprofit_membership_tiers')
+    return list(DEFAULT_MEMBERSHIP_TIERS) if tiers is None else tiers
+
+
+def is_membership_open(business):
+    attrs = (business.attributes or {}) if business else {}
+    return bool(attrs.get('nonprofit_membership_open', True))
+
+
+def is_donations_open(business):
+    attrs = (business.attributes or {}) if business else {}
+    return bool(attrs.get('nonprofit_donate_open', True))
 
 
 class NonprofitStaff(db.Model):
@@ -155,9 +187,14 @@ class NonprofitFamilyLoginCode(db.Model):
 
 
 class NonprofitHoliday(db.Model):
-    """A holiday/event with per-seat pricing (member vs. non-member),
-    sold via NonprofitBill/NonprofitSignup below. Prices in agorot, like
-    everything else in this module."""
+    """A holiday/event, sold via NonprofitBill/NonprofitSignup below.
+    Pricing is owner-defined per event through `tiers` (NonprofitHolidayTier)
+    -- an arbitrary set of named price levels (e.g. "Member"/"Non-Member",
+    or "Adult"/"Child" for a non-seating event), not just a fixed member/
+    non-member pair. `member_price_cents`/`non_member_price_cents` are kept
+    as legacy, now-nullable columns purely so a holiday created before
+    tiers existed still has its original two prices on record; they are
+    never read for pricing any more (see NonprofitHolidayTier instead)."""
     __tablename__ = 'nonprofit_holiday'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -168,8 +205,8 @@ class NonprofitHoliday(db.Model):
     name_he = db.Column(db.String(150), nullable=True)
     description_en = db.Column(db.Text, nullable=True)
     description_he = db.Column(db.Text, nullable=True)
-    member_price_cents = db.Column(db.Integer, nullable=False)
-    non_member_price_cents = db.Column(db.Integer, nullable=False)
+    member_price_cents = db.Column(db.Integer, nullable=True)
+    non_member_price_cents = db.Column(db.Integer, nullable=True)
     is_open = db.Column(db.Boolean, nullable=False, default=True, server_default='true')
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -177,10 +214,12 @@ class NonprofitHoliday(db.Model):
 
     business = db.relationship('Business', backref=db.backref('nonprofit_holidays', lazy=True, cascade='all, delete-orphan'))
     signups = db.relationship('NonprofitSignup', backref='holiday', lazy=True)
+    tiers = db.relationship('NonprofitHolidayTier', backref='holiday', lazy=True, cascade='all, delete-orphan',
+                             order_by='NonprofitHolidayTier.order')
 
     __table_args__ = (db.UniqueConstraint('business_id', 'slug', name='uq_nonprofit_holiday_business_slug'),)
 
-    def __init__(self, business_id, slug, name_en, member_price_cents, non_member_price_cents,
+    def __init__(self, business_id, slug, name_en, member_price_cents=None, non_member_price_cents=None,
                  name_he=None, description_en=None, description_he=None, is_open=True):
         self.business_id = business_id
         self.slug = slug
@@ -192,11 +231,39 @@ class NonprofitHoliday(db.Model):
         self.non_member_price_cents = non_member_price_cents
         self.is_open = is_open
 
-    def price_for(self, is_member):
-        return self.member_price_cents if is_member else self.non_member_price_cents
-
     def __repr__(self):
         return f'NonprofitHoliday({self.id}) business={self.business_id} {self.slug!r}'
+
+
+class NonprofitHolidayTier(db.Model):
+    """One owner-named price level for a NonprofitHoliday (e.g. "Member",
+    "Non-Member", "Child") -- replaces the old fixed member/non-member
+    pair so an event can have any number of price levels, not just two.
+    Soft-removed (archived_at), same convention as NonprofitFormField --
+    an archived tier stops appearing on the public page/block but a past
+    NonprofitSignup.seat_breakdown that still references its id keeps
+    resolving (for exports/admin display)."""
+    __tablename__ = 'nonprofit_holiday_tier'
+
+    id = db.Column(db.Integer, primary_key=True)
+    holiday_id = db.Column(db.Integer, db.ForeignKey('nonprofit_holiday.id'), nullable=False, index=True)
+
+    label = db.Column(db.String(100), nullable=False)
+    price_cents = db.Column(db.Integer, nullable=False)
+    order = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    archived_at = db.Column(db.DateTime, nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __init__(self, holiday_id, label, price_cents, order=0):
+        self.holiday_id = holiday_id
+        self.label = label
+        self.price_cents = price_cents
+        self.order = order
+
+    def __repr__(self):
+        return f'NonprofitHolidayTier({self.id}) holiday={self.holiday_id} {self.label!r}'
 
 
 class NonprofitBill(db.Model):
@@ -251,7 +318,14 @@ class NonprofitBill(db.Model):
 class NonprofitSignup(db.Model):
     """One holiday within one bill. Soft-deleted only (deleted_at) --
     excluded from every admin view/total/CSV export but never hard-
-    deleted, same convention used for FormField/FormResponse below."""
+    deleted, same convention used for FormField/FormResponse below.
+
+    `men_seats`/`women_seats` are legacy columns, left exactly as they
+    were for every signup created before per-event tiers existed -- never
+    written to by new code, only read as a display fallback when
+    `seat_breakdown` is empty. New signups record their seat counts in
+    `seat_breakdown` instead: a {tier_id (str): seat count} map, since a
+    tiered event can have any number of named price levels, not just two."""
     __tablename__ = 'nonprofit_signup'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -260,6 +334,7 @@ class NonprofitSignup(db.Model):
 
     men_seats = db.Column(db.Integer, nullable=False, default=0, server_default='0')
     women_seats = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    seat_breakdown = db.Column(db.JSON, nullable=True)
     total_cents = db.Column(db.Integer, nullable=False, default=0)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -268,11 +343,12 @@ class NonprofitSignup(db.Model):
 
     __table_args__ = (db.UniqueConstraint('bill_id', 'holiday_id', name='uq_nonprofit_signup_bill_holiday'),)
 
-    def __init__(self, bill_id, holiday_id, men_seats=0, women_seats=0, total_cents=0):
+    def __init__(self, bill_id, holiday_id, men_seats=0, women_seats=0, total_cents=0, seat_breakdown=None):
         self.bill_id = bill_id
         self.holiday_id = holiday_id
         self.men_seats = men_seats
         self.women_seats = women_seats
+        self.seat_breakdown = seat_breakdown
         self.total_cents = total_cents
 
     def __repr__(self):
