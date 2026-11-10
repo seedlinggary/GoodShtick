@@ -748,11 +748,19 @@ class NonprofitFormField(db.Model):
     condition_mode = db.Column(db.String(10), nullable=True)  # 'show_if' | 'hide_if'
     alt_label = db.Column(db.String(200), nullable=True)
 
+    # {align, color, size} -- same shape as the site-builder's own
+    # resolveItemStyle() (ContentBlocks.js), just without `bg` (a field
+    # label has no card concept). Nullable: None means "use the normal
+    # form styling," same convention every other optional override here
+    # already uses (alt_label, condition_*).
+    label_style = db.Column(db.JSON, nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __init__(self, form_id, label, type, required=False, options=None, help_text=None, order=0,
-                 condition_field_id=None, condition_value=None, condition_mode=None, alt_label=None):
+                 condition_field_id=None, condition_value=None, condition_mode=None, alt_label=None,
+                 label_style=None):
         self.form_id = form_id
         self.label = label
         self.type = type
@@ -764,6 +772,7 @@ class NonprofitFormField(db.Model):
         self.condition_value = condition_value
         self.condition_mode = condition_mode
         self.alt_label = alt_label
+        self.label_style = label_style
 
     def __repr__(self):
         return f'NonprofitFormField({self.id}) form={self.form_id} {self.label!r}'

@@ -68,7 +68,7 @@ def _serialize_field(f):
         'id': f.id, 'label': f.label, 'type': f.type, 'required': f.required, 'options': f.options,
         'help_text': f.help_text, 'order': f.order, 'archived': f.archived_at is not None,
         'condition_field_id': f.condition_field_id, 'condition_value': f.condition_value,
-        'condition_mode': f.condition_mode, 'alt_label': f.alt_label,
+        'condition_mode': f.condition_mode, 'alt_label': f.alt_label, 'label_style': f.label_style,
     }
 
 
@@ -179,6 +179,7 @@ def save_form(staff, form_id):
                 existing_field.condition_value = field_data.get('condition_value')
                 existing_field.condition_mode = condition_mode
                 existing_field.alt_label = field_data.get('alt_label')
+                existing_field.label_style = field_data.get('label_style')
                 existing_field.archived_at = None
                 seen_ids.add(existing_field.id)
             else:
@@ -188,6 +189,7 @@ def save_form(staff, form_id):
                     help_text=field_data.get('help_text'), order=i,
                     condition_field_id=field_data.get('condition_field_id'), condition_value=field_data.get('condition_value'),
                     condition_mode=condition_mode, alt_label=field_data.get('alt_label'),
+                    label_style=field_data.get('label_style'),
                 )
                 db.session.add(new_field)
                 db.session.flush()

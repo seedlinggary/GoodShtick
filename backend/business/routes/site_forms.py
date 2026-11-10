@@ -159,6 +159,7 @@ def save_form(current_user, form_id):
                 existing_field.condition_value = field_data.get('condition_value')
                 existing_field.condition_mode = condition_mode
                 existing_field.alt_label = field_data.get('alt_label')
+                existing_field.label_style = field_data.get('label_style')
                 existing_field.archived_at = None
                 seen_ids.add(existing_field.id)
             else:
@@ -168,6 +169,7 @@ def save_form(current_user, form_id):
                     help_text=field_data.get('help_text'), order=i,
                     condition_field_id=field_data.get('condition_field_id'), condition_value=field_data.get('condition_value'),
                     condition_mode=condition_mode, alt_label=field_data.get('alt_label'),
+                    label_style=field_data.get('label_style'),
                 )
                 db.session.add(new_field)
                 db.session.flush()
