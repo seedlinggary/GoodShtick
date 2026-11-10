@@ -164,6 +164,14 @@ class Order(db.Model):
     # Invoice table. NULL until paid; never reassigned after.
     invoice_number = db.Column(db.String(32), nullable=True, unique=True, index=True)
 
+    # Set once a real Green Invoice document has been issued for this order
+    # (see payments/green_invoice.py + routes/payments.py's
+    # _mark_order_paid) -- NULL when the business has no enabled
+    # GreenInvoiceAccount, or the call failed (never retried automatically;
+    # the internal PDF invoice_number above always still works either way).
+    green_invoice_doc_id = db.Column(db.String(64), nullable=True)
+    green_invoice_pdf_url = db.Column(db.Text, nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

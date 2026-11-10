@@ -243,6 +243,15 @@ def update_appointment(current_user, appointment_id):
         if body['status'] not in ('scheduled', 'completed', 'canceled', 'no_show'):
             return jsonify({'message': 'Invalid status'}), 400
         appointment.status = body['status']
+        if body['status'] == 'canceled' and appointment.google_event_id:
+            try:
+                from backend.business.modals.calendar_account import CalendarAccount
+                from backend.business.calendar.google import delete_event
+                account = CalendarAccount.query.filter_by(business_id=appointment.business_id, status='active').first()
+                if account:
+                    delete_event(account, appointment.google_event_id)
+            except Exception:
+                pass  # a Calendar failure must never block cancelling the appointment itself
     if 'notes' in body:
         appointment.notes = (body['notes'] or '').strip() or None
     db.session.commit()

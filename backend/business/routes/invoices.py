@@ -7,6 +7,7 @@ pattern that file's own PDF route uses), not a new PDF dependency.
 """
 import io
 import secrets
+from datetime import datetime
 
 from flask import Blueprint, jsonify, request, send_file
 from reportlab.lib import colors
@@ -19,6 +20,9 @@ from config import db
 from security import token_required
 from backend.business.modals.business import Business
 from backend.business.modals.commerce import Order
+from backend.business.modals.green_invoice_account import GreenInvoiceAccount
+from backend.business.payments.green_invoice import create_credit_note, validate_credentials, GreenInvoiceError
+from backend.business.social.crypto import encrypt_token
 
 invoices_api = Blueprint('invoices_api', __name__, url_prefix='/business')
 
@@ -110,7 +114,89 @@ def list_invoices(current_user, business_id):
         'currency': o.currency,
         'status': o.status,
         'created_at': o.created_at.isoformat() if o.created_at else None,
+        'green_invoice_doc_id': o.green_invoice_doc_id,
+        'green_invoice_pdf_url': o.green_invoice_pdf_url,
     } for o in orders]})
+
+
+# ── Green Invoice settings ───────────────────────────────────────────────────
+
+def _serialize_green_invoice(account):
+    if not account:
+        return {'connected': False, 'enabled': False, 'api_key_id': None}
+    return {'connected': True, 'enabled': account.enabled, 'api_key_id': account.api_key_id, 'last_error': account.last_error}
+
+
+@invoices_api.route('/businesses/<int:business_id>/green-invoice', methods=['GET'])
+@token_required
+def get_green_invoice(current_user, business_id):
+    business, err = _owned_business_or_error(business_id, current_user)
+    if err:
+        return err
+    account = GreenInvoiceAccount.query.filter_by(business_id=business.id).first()
+    return jsonify(_serialize_green_invoice(account))
+
+
+@invoices_api.route('/businesses/<int:business_id>/green-invoice', methods=['PATCH'])
+@token_required
+def update_green_invoice(current_user, business_id):
+    """api_key_id/api_secret are both required the first time; api_secret
+    can be omitted on a later save that's only toggling `enabled` (the
+    secret is never sent back to the frontend to re-submit)."""
+    business, err = _owned_business_or_error(business_id, current_user)
+    if err:
+        return err
+    body = request.get_json() or {}
+    account = GreenInvoiceAccount.query.filter_by(business_id=business.id).first()
+
+    api_key_id = (body.get('api_key_id') or '').strip()
+    api_secret = (body.get('api_secret') or '').strip()
+    if not account and (not api_key_id or not api_secret):
+        return jsonify({'message': 'api_key_id and api_secret are both required'}), 400
+
+    if not account:
+        account = GreenInvoiceAccount(business_id=business.id, api_key_id=api_key_id, api_secret_enc=encrypt_token(api_secret))
+        db.session.add(account)
+    else:
+        if api_key_id:
+            account.api_key_id = api_key_id
+        if api_secret:
+            account.api_secret_enc = encrypt_token(api_secret)
+    if 'enabled' in body:
+        account.enabled = bool(body['enabled'])
+    account.connected_by = current_user.public_id
+    account.connected_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(_serialize_green_invoice(account))
+
+
+@invoices_api.route('/businesses/<int:business_id>/green-invoice/test', methods=['POST'])
+@token_required
+def test_green_invoice(current_user, business_id):
+    business, err = _owned_business_or_error(business_id, current_user)
+    if err:
+        return err
+    account = GreenInvoiceAccount.query.filter_by(business_id=business.id).first()
+    if not account:
+        return jsonify({'message': 'Green Invoice is not connected yet'}), 400
+    try:
+        validate_credentials(account)
+    except GreenInvoiceError as exc:
+        return jsonify({'message': str(exc)}), 400
+    return jsonify({'message': 'Connection successful'})
+
+
+@invoices_api.route('/businesses/<int:business_id>/green-invoice', methods=['DELETE'])
+@token_required
+def disconnect_green_invoice(current_user, business_id):
+    business, err = _owned_business_or_error(business_id, current_user)
+    if err:
+        return err
+    account = GreenInvoiceAccount.query.filter_by(business_id=business.id).first()
+    if account:
+        db.session.delete(account)
+        db.session.commit()
+    return jsonify({'message': 'Disconnected'})
 
 
 @invoices_api.route('/orders/<int:order_id>/invoice.pdf', methods=['GET'])
@@ -135,3 +221,30 @@ def get_invoice_pdf(current_user, order_id):
         as_attachment=request.args.get('download') == '1',
         download_name=f'{order.invoice_number}.pdf',
     )
+
+
+@invoices_api.route('/orders/<int:order_id>/invoice/credit-note', methods=['POST'])
+@token_required
+def issue_credit_note(current_user, order_id):
+    """Owner-triggered -- there's no refund webhook anywhere in this
+    codebase today, so this is the only way a Green Invoice document gets
+    voided. Green Invoice documents are immutable once issued; a credit
+    note is the only way to cancel one (see payments/green_invoice.py)."""
+    order = db.session.get(Order, order_id)
+    if not order:
+        return jsonify({'message': 'Order not found'}), 404
+    business, err = _owned_business_or_error(order.business_id, current_user)
+    if err:
+        return err
+    if not order.green_invoice_doc_id:
+        return jsonify({'message': 'No Green Invoice document exists for this order'}), 400
+
+    account = GreenInvoiceAccount.query.filter_by(business_id=business.id).first()
+    if not account:
+        return jsonify({'message': 'Green Invoice is no longer connected for this business'}), 409
+    try:
+        credit_doc_id, credit_pdf_url = create_credit_note(account, order.green_invoice_doc_id)
+    except GreenInvoiceError as exc:
+        return jsonify({'message': str(exc)}), 502
+
+    return jsonify({'credit_note_doc_id': credit_doc_id, 'credit_note_pdf_url': credit_pdf_url})

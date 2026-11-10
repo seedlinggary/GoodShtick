@@ -103,6 +103,47 @@ def start_connect(current_user, business_id):
     return jsonify({'authorize_url': authorize_url})
 
 
+@payments_api.route('/businesses/<int:business_id>/payments/connect/manual', methods=['POST'])
+@token_required
+def manual_connect(current_user, business_id):
+    """Fallback to OAuth -- paste an existing acct_... id directly. Same
+    tolerance for a platform key that can't fully read an account it
+    doesn't own as the reference this was ported from: the id's shape and
+    Stripe actually recognizing it are what's verified, not full read
+    access to the account's details."""
+    business = db.session.get(Business, business_id)
+    if not business or not _can_manage(business, current_user):
+        return jsonify({'message': 'Not authorized'}), 403
+    if not stripe_is_configured():
+        return jsonify({'message': "Payments aren't configured on this deployment yet"}), 501
+
+    account_id = ((request.get_json() or {}).get('account_id') or '').strip()
+    if not account_id.startswith('acct_'):
+        return jsonify({'message': "Invalid Stripe account id -- must start with 'acct_'"}), 400
+
+    import stripe as _stripe
+    _stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
+    try:
+        _stripe.Account.retrieve(account_id)
+    except _stripe.error.PermissionError:
+        pass  # a test-mode platform key can't retrieve an account it doesn't own -- the id is still valid
+    except _stripe.error.InvalidRequestError:
+        return jsonify({'message': 'That Stripe account could not be found'}), 400
+    except Exception:  # noqa: BLE001 -- surface a clean error, never a stack trace
+        return jsonify({'message': 'Could not verify that Stripe account -- try again'}), 502
+
+    account = PaymentAccount.query.filter_by(business_id=business_id).first()
+    if not account:
+        account = PaymentAccount(business_id=business_id, provider='stripe')
+        db.session.add(account)
+    account.external_account_id = account_id
+    account.status = 'active'
+    account.connected_by = current_user.public_id
+    account.connected_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify(_serialize_account(account))
+
+
 @payments_api.route('/payments/oauth/stripe/callback', methods=['GET'])
 def stripe_oauth_callback():
     state = _read_state(request.args.get('state', ''))
@@ -216,6 +257,44 @@ def _mark_order_paid(session_id):
             _send_receipt_email(business, order, pdf_bytes)
         except Exception:
             pass  # a receipt email failure must never undo the order being marked paid
+
+        try:
+            _issue_green_invoice_document(business, order)
+        except Exception:
+            pass  # same convention -- a Green Invoice failure never undoes the order being marked paid
+
+        try:
+            _push_appointment_to_calendar(business, order)
+        except Exception:
+            pass  # same convention -- a Calendar failure never undoes the order being marked paid
+
+
+def _issue_green_invoice_document(business, order):
+    from backend.business.modals.green_invoice_account import GreenInvoiceAccount
+    from backend.business.payments.green_invoice import create_receipt_invoice, GreenInvoiceError
+
+    account = GreenInvoiceAccount.query.filter_by(business_id=business.id, enabled=True).first()
+    if not account:
+        return
+    try:
+        doc_id, pdf_url, _vat = create_receipt_invoice(account, order)
+    except GreenInvoiceError as exc:
+        account.last_error = str(exc)
+        db.session.commit()
+        return
+    order.green_invoice_doc_id = doc_id
+    order.green_invoice_pdf_url = pdf_url
+    account.last_error = None
+    db.session.commit()
+
+
+def _push_appointment_to_calendar(business, order):
+    from backend.business.modals.booking import Appointment
+    from backend.business.calendar.google import push_new_appointment
+
+    appointment = Appointment.query.filter_by(order_id=order.id).first()
+    if appointment:
+        push_new_appointment(business, appointment)
 
 
 @payments_api.route('/payments/webhook/stripe', methods=['POST'])

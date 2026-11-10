@@ -157,6 +157,12 @@ class Appointment(db.Model):
     override_price_cents = db.Column(db.Integer, nullable=True)
     notes = db.Column(db.Text, nullable=True)
 
+    # Set once this appointment is pushed to the owner's connected Google
+    # Calendar (see calendar/google.py) -- NULL for a business with no
+    # CalendarAccount, or for an appointment that existed before this
+    # feature. Lets update_appointment delete the right event on cancel.
+    google_event_id = db.Column(db.String(255), nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     business = db.relationship('Business', backref=db.backref('appointments', lazy=True, cascade='all, delete-orphan'))

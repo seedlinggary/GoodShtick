@@ -204,6 +204,7 @@ def get_site_by_subdomain(subdomain):
         'name': business.name,
         'about': business.about,
         'logo': get_public_url(business.logo) if business.logo else None,
+        'favicon_url': site.favicon_url,
         'enabled_modules': site.enabled_modules or {},
         **_site_chrome(site),
     })
@@ -260,6 +261,7 @@ def get_public_page(subdomain, slug):
         },
         'sections': version.sections,
         'enabled_modules': site.enabled_modules or {},
+        'favicon_url': site.favicon_url,
         'structured_data': _structured_data(business, site, version.sections),
         **_site_chrome(site),
     })
@@ -615,6 +617,21 @@ def get_booking_slots(subdomain, service_type_id):
         Appointment.start_at >= day_start, Appointment.start_at < day_end,
     ).all()
 
+    # Best-effort: also exclude anything busy on the owner's connected
+    # Google Calendar (a personal appointment, a block-off, etc, not just
+    # this platform's own Appointment rows) -- a Calendar API hiccup here
+    # just falls back to the internal-only conflict check below, never
+    # breaks slot listing.
+    calendar_busy = []
+    from backend.business.modals.calendar_account import CalendarAccount
+    calendar_account = CalendarAccount.query.filter_by(business_id=business.id, status='active').first()
+    if calendar_account:
+        try:
+            from backend.business.calendar.google import get_busy_periods
+            calendar_busy = get_busy_periods(calendar_account, day_start, day_end)
+        except Exception:
+            calendar_busy = []
+
     duration = timedelta(minutes=service.duration_minutes)
     now = datetime.utcnow()
     seen, slots = set(), []
@@ -625,7 +642,8 @@ def get_booking_slots(subdomain, service_type_id):
         while cursor + duration <= window_end:
             if cursor not in seen and cursor > now:
                 conflict = any(a.start_at < cursor + duration and a.end_at > cursor for a in existing)
-                if not conflict:
+                busy = any(b_start < cursor + duration and b_end > cursor for b_start, b_end in calendar_busy)
+                if not conflict and not busy:
                     slots.append(cursor.strftime('%H:%M'))
                 seen.add(cursor)
             cursor += step
@@ -709,6 +727,11 @@ def submit_booking_checkout(current_user, subdomain):
 
     if not service.price_cents:
         db.session.commit()
+        try:
+            from backend.business.calendar.google import push_new_appointment
+            push_new_appointment(business, appointment)
+        except Exception:
+            pass  # a Calendar failure must never block a free booking
         notify(business.owner_user_id, f'New booking: {service.name} on {start_at.strftime("%b %d at %I:%M %p")}',
                type='booking', link=f'/business/{business.slug}/tools')
         return jsonify({'appointment_id': appointment.id, 'requires_payment': False})

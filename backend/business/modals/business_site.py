@@ -273,6 +273,18 @@ class BusinessSite(db.Model):
     share_products_with_community = db.Column(db.Boolean, nullable=False, default=True, server_default='true')
     share_deals_with_community = db.Column(db.Boolean, nullable=False, default=True, server_default='true')
 
+    # Browser-tab icon for the public site -- an uploaded image URL (same
+    # upload pipeline as everything else uploaded via upload.py), not a
+    # generated favicon set. NULL falls back to this platform's own icon.
+    favicon_url = db.Column(db.String(500), nullable=True)
+
+    # One-time "finish setting up your site" wizard (domain/Stripe ->
+    # Google Calendar -> Green Invoice -> favicon) -- true once the owner
+    # has dismissed or finished it. Never reset automatically; the owner can
+    # still reopen the same steps anytime from a small entry point in the
+    # section tabs, this flag only controls whether it shows unprompted.
+    setup_wizard_dismissed = db.Column(db.Boolean, nullable=False, default=False, server_default='false')
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     published_at = db.Column(db.DateTime, nullable=True)

@@ -42,6 +42,7 @@ from backend.business.routes.business_site_public import business_site_public_ap
 from backend.business.routes.site_pages import site_pages_api
 from backend.business.routes.site_forms import site_forms_api
 from backend.business.routes.payments import payments_api
+from backend.business.routes.calendar import calendar_api
 from backend.business.routes.commerce import commerce_api
 from backend.business.routes.booking import booking_api
 from backend.business.routes.crm import crm_api
@@ -184,6 +185,7 @@ application.register_blueprint(business_site_public_api)
 application.register_blueprint(site_pages_api)
 application.register_blueprint(site_forms_api)
 application.register_blueprint(payments_api)
+application.register_blueprint(calendar_api)
 application.register_blueprint(commerce_api)
 application.register_blueprint(booking_api)
 application.register_blueprint(crm_api)

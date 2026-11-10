@@ -121,6 +121,8 @@ def _serialize(site):
         } if site.custom_domain and site.custom_domain_token else None,
         'share_products_with_community': site.share_products_with_community,
         'share_deals_with_community': site.share_deals_with_community,
+        'favicon_url': site.favicon_url,
+        'setup_wizard_dismissed': site.setup_wizard_dismissed,
         'created_at': site.created_at.isoformat() if site.created_at else None,
         'updated_at': site.updated_at.isoformat() if site.updated_at else None,
         'published_at': site.published_at.isoformat() if site.published_at else None,
@@ -257,6 +259,12 @@ def update_site(current_user, business_id):
 
     if 'share_deals_with_community' in body:
         site.share_deals_with_community = bool(body['share_deals_with_community'])
+
+    if 'favicon_url' in body:
+        site.favicon_url = (body['favicon_url'] or '').strip() or None
+
+    if 'setup_wizard_dismissed' in body:
+        site.setup_wizard_dismissed = bool(body['setup_wizard_dismissed'])
 
     if 'status' in body:
         if body['status'] not in SITE_STATUSES:
