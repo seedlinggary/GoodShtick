@@ -70,6 +70,7 @@ from backend.business.routes.nonprofit_dashboard import nonprofit_dashboard_api
 from backend.business.routes.nonprofit_family_portal import nonprofit_family_portal_api
 from backend.estates.routes.estates import estates_api
 from backend.estates.routes.estates_group_buy import group_buy_api
+from backend.estates_data.routes.estates_data import estates_data_api
 from backend.marketplace.routes.marketplace import marketplace_api
 from backend.finance.routes.finance_market import finance_market_api
 from backend.finance.routes.finance_budget import finance_budget_api
@@ -139,6 +140,10 @@ from backend.business.modals.site_ai_usage import SiteAiUsage
 from backend.estates.modals.estates import (
     EstatesListing, EstatesListingPhoto, EstatesListingLike,
     EstatesGroupBuy, EstatesGroupBuyPhoto, EstatesGroupBuyMember,
+)
+from backend.estates_data.modals.estates_data import (
+    RawIngestRecord, Entity, GeoParcel, Address, Building, Unit,
+    LandTender, ConstructionPermit, SaleTransaction, SalePayment, ArnonaRate,
 )
 from backend.finance.modals.finance import (
     FinanceDataCache, FinanceWatchlistItem, FinanceBudget, FinanceBudgetCategory, FinanceSavedScenario,
@@ -212,6 +217,7 @@ application.register_blueprint(nonprofit_family_portal_api)
 application.register_blueprint(community_api)
 application.register_blueprint(minyan_api)
 application.register_blueprint(estates_api)
+application.register_blueprint(estates_data_api)
 application.register_blueprint(marketplace_api)
 application.register_blueprint(group_buy_api)
 application.register_blueprint(finance_market_api)
