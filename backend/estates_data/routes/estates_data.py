@@ -2,15 +2,21 @@ from flask import Blueprint, jsonify, request
 
 from security import admin_required
 from backend.estates_data.modals.estates_data import RawIngestRecord, ArnonaRate
-from backend.estates_data.connectors import data_gov_il
+from backend.estates_data.connectors import data_gov_il, nadlan_gov, rmi_tenders
+from backend.estates_data.connectors.apify_client import ApifyNotConfigured
 
 estates_data_api = Blueprint('estates_data_api', __name__, url_prefix='/estates-data')
 
-# Build order step 1 (see the plan): one working connector, visible only
-# through a plain admin list -- no linking/public API yet. nadlan_gov isn't
-# registered here yet, see connectors/nadlan_gov.py for why.
+# Every connector exposes one `ingest(**kwargs)` entrypoint (see each
+# module's own `ingest = ...` alias) so run_ingest() below can call any of
+# them the same way, passing the request body straight through as kwargs.
+# nadlan_gov and rmi_tenders are billed Apify actor runs (see their
+# docstrings) -- registering them here does not run anything by itself,
+# they only run when POSTed to explicitly.
 CONNECTORS = {
     'data_gov_il': data_gov_il,
+    'nadlan_gov': nadlan_gov,
+    'rmi_tenders': rmi_tenders,
 }
 
 
@@ -54,17 +60,24 @@ def list_raw_records(current_user):
 @estates_data_api.route('/admin/ingest/<source>', methods=['POST'])
 @admin_required
 def run_ingest(current_user, source):
+    """Body is passed straight through as kwargs to that connector's
+    ingest() -- see each connector module's docstring for what it takes
+    (e.g. data_gov_il needs `resource_id`; nadlan_gov needs
+    `cities_hebrew`; rmi_tenders takes everything optionally). nadlan_gov
+    and rmi_tenders are BILLED Apify actor runs -- nothing about this
+    route caps that spend beyond whatever `max_items`/`maxItems` is
+    passed in the body, so pass one explicitly on a first run."""
     connector = CONNECTORS.get(source)
     if not connector:
         return jsonify({'error': f'Unknown source "{source}". Known: {list(CONNECTORS)}'}), 400
 
     body = request.get_json(silent=True) or {}
-    resource_id = body.get('resource_id')
-    if not resource_id:
-        return jsonify({'error': 'resource_id is required (a data.gov.il CKAN resource id)'}), 400
-
     try:
-        staged = connector.ingest_resource(resource_id)
+        staged = connector.ingest(**body)
+    except ApifyNotConfigured as exc:
+        return jsonify({'error': str(exc)}), 400
+    except TypeError as exc:
+        return jsonify({'error': f'Bad arguments for "{source}": {exc}'}), 400
     except Exception as exc:
         return jsonify({'error': str(exc)}), 502
     return jsonify({'staged': staged})

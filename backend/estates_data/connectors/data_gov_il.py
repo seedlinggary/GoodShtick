@@ -57,3 +57,8 @@ def ingest_resource(resource_id, id_field='_id', page_size=1000, max_pages=50):
             break
         offset += page_size
     return staged
+
+
+# Uniform entrypoint routes/estates_data.py's run_ingest() calls on every
+# connector -- see nadlan_gov.py and rmi_tenders.py for their own aliases.
+ingest = ingest_resource
