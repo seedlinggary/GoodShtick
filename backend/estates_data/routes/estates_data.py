@@ -1,9 +1,13 @@
 from flask import Blueprint, jsonify, request
 
 from security import admin_required
-from backend.estates_data.modals.estates_data import RawIngestRecord, ArnonaRate
+from config import db
+from backend.estates_data.modals.estates_data import (
+    RawIngestRecord, ArnonaRate, Entity, Building, LandTender, ConstructionPermit, SaleTransaction,
+)
 from backend.estates_data.connectors import data_gov_il, nadlan_gov, rmi_tenders, manual_import
 from backend.estates_data.connectors.apify_client import ApifyNotConfigured
+from backend.estates_data import normalize as normalize_module
 
 estates_data_api = Blueprint('estates_data_api', __name__, url_prefix='/estates-data')
 
@@ -142,8 +146,6 @@ def list_arnona_rates(current_user):
 @estates_data_api.route('/admin/arnona-rates', methods=['POST'])
 @admin_required
 def create_arnona_rate(current_user):
-    from config import db
-
     body = request.get_json(silent=True) or {}
     missing = [f for f in ('municipality', 'year', 'rate_per_sqm', 'source_name') if not body.get(f)]
     if missing:
@@ -163,3 +165,76 @@ def create_arnona_rate(current_user):
     db.session.add(rate)
     db.session.commit()
     return jsonify(_arnona_dict(rate)), 201
+
+
+# ── Linking engine -- normalize raw rows, review low-confidence links ────
+@estates_data_api.route('/admin/normalize', methods=['POST'])
+@admin_required
+def run_normalize(current_user):
+    """Processes pending RawIngestRecords into canonical rows (parcels,
+    entities, sale transactions/tenders) via normalize.py -- see that
+    module for what "pending" and per-source dispatch mean."""
+    body = request.get_json(silent=True) or {}
+    limit = int(body.get('limit', 500))
+    return jsonify(normalize_module.run_normalization(limit=limit))
+
+
+@estates_data_api.route('/admin/review-queue', methods=['GET'])
+@admin_required
+def review_queue(current_user):
+    """Canonical records the linking engine wasn't fully sure about --
+    e.g. a brand-new parcel created from gush/helka alone with no
+    cross-source confirmation yet, or a sale/tender it couldn't resolve a
+    parcel for at all (confidence 0.3). Nothing here was auto-merged into
+    anything; it's surfaced for a human to confirm or fix."""
+    threshold = float(request.args.get('max_confidence', 0.7))
+    sales = (SaleTransaction.query.filter(SaleTransaction.confidence < threshold)
+             .order_by(SaleTransaction.created_at.desc()).limit(100).all())
+    tenders = (LandTender.query.filter(LandTender.confidence < threshold)
+               .order_by(LandTender.created_at.desc()).limit(100).all())
+    return jsonify({
+        'sale_transactions': [
+            {
+                'id': s.id, 'confidence': s.confidence, 'total_price': s.total_price,
+                'deal_date': s.deal_date.isoformat() if s.deal_date else None,
+                'parcel_id': s.parcel_id, 'unit_id': s.unit_id, 'source_name': s.source_name,
+            }
+            for s in sales
+        ],
+        'land_tenders': [
+            {
+                'id': t.id, 'confidence': t.confidence, 'price': t.price,
+                'tender_number': t.tender_number, 'parcel_id': t.parcel_id, 'source_name': t.source_name,
+            }
+            for t in tenders
+        ],
+    })
+
+
+@estates_data_api.route('/admin/entities/merge', methods=['POST'])
+@admin_required
+def merge_entities(current_user):
+    """Reassigns every FK pointing at `duplicate_id` onto `keep_id`, then
+    deletes the duplicate row -- for when linking.py's own normalized-
+    name matching missed two spellings of the same builder."""
+    body = request.get_json(silent=True) or {}
+    keep_id = body.get('keep_id')
+    duplicate_id = body.get('duplicate_id')
+    if not keep_id or not duplicate_id or keep_id == duplicate_id:
+        return jsonify({'error': 'keep_id and duplicate_id are required and must differ'}), 400
+
+    keep = Entity.query.get(keep_id)
+    duplicate = Entity.query.get(duplicate_id)
+    if not keep or not duplicate:
+        return jsonify({'error': 'keep_id or duplicate_id not found'}), 404
+
+    for model, field in (
+        (Building, 'developer_entity_id'), (LandTender, 'winner_entity_id'),
+        (ConstructionPermit, 'entity_id'), (SaleTransaction, 'buyer_entity_id'),
+        (SaleTransaction, 'seller_entity_id'),
+    ):
+        model.query.filter_by(**{field: duplicate_id}).update({field: keep_id})
+
+    db.session.delete(duplicate)
+    db.session.commit()
+    return jsonify({'merged_into': keep_id})
