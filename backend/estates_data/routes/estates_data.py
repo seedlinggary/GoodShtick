@@ -2,7 +2,7 @@ from flask import Blueprint, jsonify, request
 
 from security import admin_required
 from backend.estates_data.modals.estates_data import RawIngestRecord, ArnonaRate
-from backend.estates_data.connectors import data_gov_il, nadlan_gov, rmi_tenders
+from backend.estates_data.connectors import data_gov_il, nadlan_gov, rmi_tenders, manual_import
 from backend.estates_data.connectors.apify_client import ApifyNotConfigured
 
 estates_data_api = Blueprint('estates_data_api', __name__, url_prefix='/estates-data')
@@ -80,6 +80,27 @@ def run_ingest(current_user, source):
         return jsonify({'error': f'Bad arguments for "{source}": {exc}'}), 400
     except Exception as exc:
         return jsonify({'error': str(exc)}), 502
+    return jsonify({'staged': staged})
+
+
+@estates_data_api.route('/admin/import-csv/<source>', methods=['POST'])
+@admin_required
+def import_csv(current_user, source):
+    """Hand-pulled data goes here, not through /admin/ingest/<source> --
+    this takes a CSV file (multipart form field "file"), not a JSON body.
+    Use a source label distinct from an automated connector's own SOURCE
+    constant, e.g. "nadlan_gov_manual" for a nadlan.gov.il export, so it
+    stays identifiable as hand-entered. See connectors/manual_import.py."""
+    upload = request.files.get('file')
+    if not upload:
+        return jsonify({'error': 'file is required (multipart form field "file")'}), 400
+
+    try:
+        csv_text = upload.read().decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return jsonify({'error': 'Could not read the file as UTF-8 CSV text'}), 400
+
+    staged = manual_import.ingest(source, csv_text)
     return jsonify({'staged': staged})
 
 
