@@ -20,8 +20,9 @@ source prefix and this dispatches by prefix, not exact source name."""
 from datetime import datetime
 
 from config import db
-from backend.estates_data.modals.estates_data import RawIngestRecord, LandTender
+from backend.estates_data.modals.estates_data import RawIngestRecord, LandTender, ArnonaRateCandidate
 from backend.estates_data import linking
+from backend.estates_data.arnona_parse import parse_arnona_candidates
 
 
 def _first(payload, *keys):
@@ -128,12 +129,30 @@ def normalize_rmi_tender(record):
     db.session.add(tender)
 
 
+def normalize_arnona_pdf(record):
+    """Unlike the other normalizers, this never writes to a trusted
+    canonical table -- parse_arnona_candidates' guesses land in
+    ArnonaRateCandidate, reviewed and approved (or rejected) by an admin
+    via /estates-data/admin/arnona-candidates, same reasoning as the
+    linking engine's own review queue for low-confidence parcels/sales."""
+    payload = record.payload
+    candidates = parse_arnona_candidates(payload.get('text') or '')
+    for c in candidates:
+        db.session.add(ArnonaRateCandidate(
+            municipality=payload.get('municipality'), year=payload.get('year'),
+            zone=c['zone'], use_type=c['use_type'], area_component=c['area_component'],
+            rate_per_sqm=c['rate_per_sqm'], confidence=c['confidence'], raw_line=c['raw_line'],
+            source_url=payload.get('pdf_url'), raw_record_id=record.id,
+        ))
+
+
 # Dispatched by source PREFIX, not exact match -- 'nadlan_gov_manual'
 # (manual_import.py's label for a hand-exported CSV) goes through the
 # same normalizer as 'nadlan_gov' (the automated Apify connector).
 NORMALIZERS = (
     ('nadlan_gov', normalize_nadlan_deal),
     ('rmi_tenders', normalize_rmi_tender),
+    ('arnona_pdf', normalize_arnona_pdf),
 )
 
 

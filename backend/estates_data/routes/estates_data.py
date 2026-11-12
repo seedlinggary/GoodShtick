@@ -3,9 +3,9 @@ from flask import Blueprint, jsonify, request
 from security import admin_required
 from config import db
 from backend.estates_data.modals.estates_data import (
-    RawIngestRecord, ArnonaRate, Entity, Building, LandTender, ConstructionPermit, SaleTransaction,
+    RawIngestRecord, ArnonaRate, ArnonaRateCandidate, Entity, Building, LandTender, ConstructionPermit, SaleTransaction,
 )
-from backend.estates_data.connectors import data_gov_il, nadlan_gov, rmi_tenders, manual_import
+from backend.estates_data.connectors import data_gov_il, nadlan_gov, rmi_tenders, manual_import, arnona_pdf
 from backend.estates_data.connectors.apify_client import ApifyNotConfigured
 from backend.estates_data import normalize as normalize_module
 
@@ -21,6 +21,7 @@ CONNECTORS = {
     'data_gov_il': data_gov_il,
     'nadlan_gov': nadlan_gov,
     'rmi_tenders': rmi_tenders,
+    'arnona_pdf': arnona_pdf,
 }
 
 
@@ -249,3 +250,71 @@ def merge_entities(current_user):
     db.session.delete(duplicate)
     db.session.commit()
     return jsonify({'merged_into': keep_id})
+
+
+# ── Arnona PDF candidates -- auto-extracted, never auto-trusted ──────────
+def _candidate_dict(c):
+    return {
+        'id': c.id, 'municipality': c.municipality, 'year': c.year, 'zone': c.zone,
+        'use_type': c.use_type, 'area_component': c.area_component, 'rate_per_sqm': c.rate_per_sqm,
+        'flat_annual_fee': c.flat_annual_fee, 'confidence': c.confidence, 'raw_line': c.raw_line,
+        'source_url': c.source_url, 'status': c.status,
+    }
+
+
+@estates_data_api.route('/admin/arnona-candidates', methods=['GET'])
+@admin_required
+def list_arnona_candidates(current_user):
+    """Everything the PDF connector's heuristic parser guessed, most
+    confident first -- nothing here has touched the real ArnonaRate
+    table yet. See arnona_parse.py for how these were produced."""
+    municipality = request.args.get('municipality')
+    status = request.args.get('status', 'pending')
+    query = ArnonaRateCandidate.query
+    if municipality:
+        query = query.filter_by(municipality=municipality)
+    if status:
+        query = query.filter_by(status=status)
+    rows = query.order_by(ArnonaRateCandidate.confidence.desc()).limit(300).all()
+    return jsonify({'results': [_candidate_dict(c) for c in rows]})
+
+
+@estates_data_api.route('/admin/arnona-candidates/<int:candidate_id>/approve', methods=['POST'])
+@admin_required
+def approve_arnona_candidate(current_user, candidate_id):
+    """Copies one candidate into the real, trusted ArnonaRate table --
+    the only path anything from the PDF connector can reach it through.
+    Body may override any field (e.g. fixing a misread zone) before it's
+    committed as real data."""
+    candidate = ArnonaRateCandidate.query.get(candidate_id)
+    if not candidate:
+        return jsonify({'error': 'Not found'}), 404
+
+    body = request.get_json(silent=True) or {}
+    rate = ArnonaRate(
+        municipality=body.get('municipality', candidate.municipality),
+        year=body.get('year', candidate.year),
+        source_name=body.get('source_name', 'Municipal arnona order (auto-extracted, admin-approved)'),
+        rate_per_sqm=body.get('rate_per_sqm', candidate.rate_per_sqm),
+        flat_annual_fee=body.get('flat_annual_fee', candidate.flat_annual_fee),
+        zone=body.get('zone', candidate.zone),
+        use_type=body.get('use_type', candidate.use_type or 'residential'),
+        area_component=body.get('area_component', candidate.area_component or 'main'),
+        source_url=body.get('source_url', candidate.source_url),
+        entered_by=current_user.public_id,
+    )
+    candidate.status = 'approved'
+    db.session.add(rate)
+    db.session.commit()
+    return jsonify(_arnona_dict(rate)), 201
+
+
+@estates_data_api.route('/admin/arnona-candidates/<int:candidate_id>/reject', methods=['POST'])
+@admin_required
+def reject_arnona_candidate(current_user, candidate_id):
+    candidate = ArnonaRateCandidate.query.get(candidate_id)
+    if not candidate:
+        return jsonify({'error': 'Not found'}), 404
+    candidate.status = 'rejected'
+    db.session.commit()
+    return jsonify({'status': 'rejected'})

@@ -143,7 +143,7 @@ from backend.estates.modals.estates import (
 )
 from backend.estates_data.modals.estates_data import (
     RawIngestRecord, Entity, GeoParcel, Address, Building, Unit,
-    LandTender, ConstructionPermit, SaleTransaction, SalePayment, ArnonaRate,
+    LandTender, ConstructionPermit, SaleTransaction, SalePayment, ArnonaRate, ArnonaRateCandidate,
 )
 from backend.finance.modals.finance import (
     FinanceDataCache, FinanceWatchlistItem, FinanceBudget, FinanceBudgetCategory, FinanceSavedScenario,

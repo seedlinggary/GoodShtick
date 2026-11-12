@@ -384,4 +384,50 @@ class ArnonaRate(db.Model):
             setattr(self, key, value)
 
     def __repr__(self):
+        return f'ArnonaRate({self.id}) {self.municipality} {self.year} {self.area_component}'
+
+
+CANDIDATE_STATUSES = ('pending', 'approved', 'rejected')
+
+
+class ArnonaRateCandidate(db.Model):
+    """A rate the automated PDF connector (connectors/arnona_pdf.py +
+    normalize.py's parser) THINKS it found in a municipality's published
+    arnona order -- never used for an estimate itself, and never promoted
+    into the trusted ArnonaRate table except by an admin's explicit
+    approval (POST /estates-data/admin/arnona-candidates/<id>/approve).
+
+    PDF table extraction is inherently heuristic (merged cells, lost
+    column alignment, inconsistent formatting between cities) -- this
+    table exists precisely so a wrong guess is reviewable and discardable
+    rather than silently trusted the way a hand-entered ArnonaRate row
+    is. `raw_line` keeps the exact source text the guess came from, so a
+    reviewer can judge it without re-opening the PDF."""
+    __tablename__ = 'estates_data_arnona_rate_candidate'
+
+    id = db.Column(db.Integer, primary_key=True)
+    municipality = db.Column(db.String(120), nullable=False, index=True)
+    year = db.Column(db.Integer, nullable=False, index=True)
+    zone = db.Column(db.String(80), nullable=True)
+    use_type = db.Column(db.String(20), nullable=True)
+    area_component = db.Column(db.String(20), nullable=True)
+    rate_per_sqm = db.Column(db.Float, nullable=True)
+    flat_annual_fee = db.Column(db.Float, nullable=True)
+    confidence = db.Column(db.Float, nullable=False, default=0.4, server_default='0.4')
+    raw_line = db.Column(db.Text, nullable=True)
+    source_url = db.Column(db.String(500), nullable=True)
+    raw_record_id = db.Column(db.Integer, db.ForeignKey('estates_data_raw_record.id'), nullable=True)
+    status = db.Column(db.String(20), nullable=False, default='pending', server_default='pending', index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __init__(self, municipality, year, **kwargs):
+        self.municipality = municipality
+        self.year = year
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    def __repr__(self):
+        return f'ArnonaRateCandidate({self.id}) {self.municipality} {self.year} [{self.status}]'
+
+    def __repr__(self):
         return f'ArnonaRate({self.id}) {self.municipality} {self.year}'
