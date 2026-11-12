@@ -125,7 +125,13 @@ def search_sources(current_user):
 
 
 # ── Arnona rates -- manually entered, admin-only ──────────────────────────
-ARNONA_FIELDS = ('municipality', 'year', 'zone', 'use_type', 'rate_per_sqm', 'currency', 'source_name', 'source_url')
+# One row is ONE component's rate (main living area / balcony / storage /
+# parking / shared -- see ArnonaRate's own docstring for why), not a whole
+# property's -- a real per-unit estimate sums the matching rows.
+ARNONA_FIELDS = (
+    'municipality', 'year', 'zone', 'use_type', 'area_component',
+    'rate_per_sqm', 'flat_annual_fee', 'currency', 'source_name', 'source_url',
+)
 
 
 def _arnona_dict(r):
@@ -147,17 +153,22 @@ def list_arnona_rates(current_user):
 @admin_required
 def create_arnona_rate(current_user):
     body = request.get_json(silent=True) or {}
-    missing = [f for f in ('municipality', 'year', 'rate_per_sqm', 'source_name') if not body.get(f)]
+    missing = [f for f in ('municipality', 'year', 'source_name') if not body.get(f)]
     if missing:
         return jsonify({'error': f'Missing required field(s): {", ".join(missing)}'}), 400
+    if body.get('rate_per_sqm') is None and body.get('flat_annual_fee') is None:
+        return jsonify({'error': 'Either rate_per_sqm or flat_annual_fee is required (most components use '
+                                  'rate_per_sqm; parking is often a flat_annual_fee instead)'}), 400
 
     rate = ArnonaRate(
         municipality=body['municipality'],
         year=body['year'],
-        rate_per_sqm=body['rate_per_sqm'],
         source_name=body['source_name'],
+        rate_per_sqm=body.get('rate_per_sqm'),
+        flat_annual_fee=body.get('flat_annual_fee'),
         zone=body.get('zone'),
         use_type=body.get('use_type', 'residential'),
+        area_component=body.get('area_component', 'main'),
         currency=body.get('currency', 'ILS'),
         source_url=body.get('source_url'),
         entered_by=current_user.public_id,

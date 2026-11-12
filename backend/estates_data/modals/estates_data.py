@@ -330,14 +330,28 @@ class SalePayment(db.Model):
 # ── Arnona -- manually entered, estimate-only ─────────────────────────────
 ARNONA_USE_TYPES = ('residential', 'commercial', 'industrial', 'office', 'other')
 
+# A real arnona order rarely charges one flat rate for a whole property --
+# the main living area, a balcony, storage, and parking are routinely
+# billed at different rates (a covered balcony often at a fraction of the
+# main rate; parking often a flat annual fee rather than per-sqm at all;
+# shared/common areas usually not billed to individual units separately).
+# Treating "rate x total size" as one number would misstate almost every
+# real unit, so each ArnonaRate row is ONE component's rate, not the whole
+# property's -- a full estimate for a unit sums its matching component
+# rows (main sqm x main rate, + balcony sqm x balcony rate, + parking's
+# flat fee, ...), computed wherever that estimate is actually shown, never
+# baked into one misleading column here.
+ARNONA_AREA_COMPONENTS = ('main', 'balcony_covered', 'balcony_open', 'storage', 'parking', 'shared', 'other')
+
 
 class ArnonaRate(db.Model):
     """Manually entered from each municipality's own published yearly
     arnona order ("tzav arnona") -- there is no feed for this, nothing here
     is ever fetched automatically. Used only to compute an ESTIMATE
-    (rate x a property's size) at query time; never presented as a real
-    bill, since actual billed amounts for a specific property are not
-    public data (only the municipal rate table is)."""
+    (rate x a property's size, per component -- see ARNONA_AREA_COMPONENTS
+    above) at query time; never presented as a real bill, since actual
+    billed amounts for a specific property are not public data (only the
+    municipal rate table is)."""
     __tablename__ = 'estates_data_arnona_rate'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -345,7 +359,12 @@ class ArnonaRate(db.Model):
     year = db.Column(db.Integer, nullable=False, index=True)
     zone = db.Column(db.String(80), nullable=True)
     use_type = db.Column(db.String(20), nullable=False, default='residential', server_default='residential')
-    rate_per_sqm = db.Column(db.Float, nullable=False)
+    area_component = db.Column(db.String(20), nullable=False, default='main', server_default='main')
+    rate_per_sqm = db.Column(db.Float, nullable=True)
+    # Some components (parking, in a lot of orders) are billed as one flat
+    # annual charge per spot rather than per square meter -- set this
+    # INSTEAD of rate_per_sqm for those, never both.
+    flat_annual_fee = db.Column(db.Float, nullable=True)
     currency = db.Column(db.String(3), nullable=False, default='ILS', server_default='ILS')
     source_name = db.Column(db.String(150), nullable=False)
     source_url = db.Column(db.String(500), nullable=True)
@@ -353,10 +372,10 @@ class ArnonaRate(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     __table_args__ = (
-        db.UniqueConstraint('municipality', 'year', 'zone', 'use_type', name='uq_estates_data_arnona_rate'),
+        db.UniqueConstraint('municipality', 'year', 'zone', 'use_type', 'area_component', name='uq_estates_data_arnona_rate'),
     )
 
-    def __init__(self, municipality, year, rate_per_sqm, source_name, **kwargs):
+    def __init__(self, municipality, year, source_name, rate_per_sqm=None, **kwargs):
         self.municipality = municipality
         self.year = year
         self.rate_per_sqm = rate_per_sqm
