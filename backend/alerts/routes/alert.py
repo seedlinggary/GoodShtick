@@ -138,8 +138,11 @@ def create_alert(current_user):
 
     if search_type not in SEARCH_TYPES:
         return jsonify({'message': f'search_type must be one of: {", ".join(SEARCH_TYPES)}'}), 400
-    if not filters or len(filters) > FILTERS_MAX:
-        return jsonify({'message': 'filters is required'}), 400
+    # Empty filters is valid and means "everything" (a catch-all alert for
+    # this search_type, e.g. GetAlertsButton's filters={{}} usage) -- only
+    # an overlong value is rejected.
+    if len(filters) > FILTERS_MAX:
+        return jsonify({'message': 'filters is too long'}), 400
     if not email or not _EMAIL_RE.match(email):
         return jsonify({'message': 'A valid email is required'}), 400
 
@@ -231,8 +234,8 @@ def update_alert(current_user, alert_id):
             return jsonify({'message': f'search_type must be one of: {", ".join(SEARCH_TYPES)}'}), 400
     if 'filters' in body:
         new_filters = (body.get('filters') or '').strip().lstrip('?')
-        if not new_filters or len(new_filters) > FILTERS_MAX:
-            return jsonify({'message': 'filters is required'}), 400
+        if len(new_filters) > FILTERS_MAX:
+            return jsonify({'message': 'filters is too long'}), 400
     search_changed = new_search_type != alert.search_type or new_filters != alert.filters
     if search_changed:
         try:
