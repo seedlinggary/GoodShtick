@@ -1,3 +1,5 @@
+from urllib.parse import urlsplit
+
 from marshmallow import Schema, fields
 
 
@@ -13,6 +15,18 @@ class CampaignLinkSchema(Schema):
     stats = fields.Method('get_stats')
 
     def get_tracked_url(self, obj):
+        """Served from the SAME host as destination_url (e.g.
+        www.gutcommunity.com), not the backend's own domain -- the frontend
+        rewrites /campaigns/r/<code> on every site domain through to this
+        same backend route (see good-shtick/vercel.json +
+        good-shtick/api/campaign-redirect.js), so a link someone shares for
+        a given site looks like it belongs to that site. Falls back to the
+        backend's own host only if destination_url is somehow not a full
+        absolute URL (shouldn't happen -- create_link/update_link require
+        one)."""
+        parts = urlsplit(obj.destination_url or '')
+        if parts.scheme and parts.netloc:
+            return f'{parts.scheme}://{parts.netloc}/campaigns/r/{obj.code}'
         api_base = (self.context or {}).get('api_base', '')
         return f'{api_base}/campaigns/r/{obj.code}'
 
