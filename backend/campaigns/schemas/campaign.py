@@ -32,7 +32,7 @@ class CampaignLinkSchema(Schema):
 
     def get_stats(self, obj):
         stats_by_link = (self.context or {}).get('stats_by_link') or {}
-        return stats_by_link.get(obj.id, {'clicks': 0, 'visitors': 0, 'signups': 0})
+        return stats_by_link.get(obj.id, {'clicks': 0, 'visitors': 0, 'signups': 0, 'contributions': 0})
 
 
 class MarketingCampaignSchema(Schema):
@@ -57,9 +57,9 @@ class MarketingCampaignSchema(Schema):
 
     def get_totals(self, obj):
         stats_by_link = (self.context or {}).get('stats_by_link') or {}
-        totals = {'clicks': 0, 'visitors': 0, 'signups': 0}
+        totals = {'clicks': 0, 'visitors': 0, 'signups': 0, 'contributions': 0}
         for link in obj.links:
-            s = stats_by_link.get(link.id, {'clicks': 0, 'visitors': 0, 'signups': 0})
+            s = stats_by_link.get(link.id, {})
             for k in totals:
                 totals[k] += s.get(k, 0)
         return totals

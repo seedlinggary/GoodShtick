@@ -16,6 +16,7 @@ from backend.user.modals.user import User
 from backend.business.modals.business import Business
 from backend.business.routes.business_owner_tools import _can_manage
 from backend.alerts.routes.alert import maybe_send_digests
+from backend.analytics.modals.visitor import VisitorEvent
 
 tachlis_api = Blueprint('tachlis_api', __name__, url_prefix='/tachlis')
 
@@ -963,6 +964,14 @@ def create_guest_post():
 
     db.session.add(post)
     db.session.commit()
+
+    # See backend/business/routes/business.py's create_guest_business for
+    # why this exists -- lets a campaign link's own stats count "did they
+    # actually contribute something" as its own conversion.
+    anon_id = (body.get('anon_id') or '').strip()[:64]
+    if anon_id:
+        db.session.add(VisitorEvent(anonymous_id=anon_id, event_type='contribution'))
+        db.session.commit()
 
     if guest_email:
         try:

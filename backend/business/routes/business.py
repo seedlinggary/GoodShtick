@@ -22,6 +22,7 @@ from backend.business.social.holidays import auto_closure_reason
 from backend.business.routes.social import maybe_publish_due_posts
 from backend.business.routes.booking import maybe_generate_recurring_appointments
 from backend.business.routes.promo_sync import maybe_generate_promo_posts
+from backend.analytics.modals.visitor import VisitorEvent
 
 RECENT_POSTS_LIMIT = 5
 RECENT_COMMENTS_LIMIT = 10
@@ -560,6 +561,17 @@ def create_guest_business():
         db.session.add(BusinessLocation(business_id=business.id, **fields))
 
     db.session.commit()
+
+    # Lets a campaign link's own stats (see backend/campaigns/routes/
+    # campaign.py's _stats_for_links) count "did they actually contribute
+    # something" as its own conversion, same anon_id/VisitorEvent pattern
+    # add_user() already uses for signups -- only written when the
+    # frontend actually has one (it always will once VisitorTracker has
+    # mounted, but never block a real submission over its absence).
+    anon_id = (body.get('anon_id') or '').strip()[:64]
+    if anon_id:
+        db.session.add(VisitorEvent(anonymous_id=anon_id, event_type='contribution'))
+        db.session.commit()
 
     if guest_email:
         try:

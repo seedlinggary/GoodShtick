@@ -16,12 +16,18 @@ PAGE_SIZE = 50
 
 
 def _stats_for_links(link_ids):
-    """clicks/visitors/signups per link_id. 'visitors' is a distinct count
-    of VisitorSession.anonymous_id rows whose first-touch landed on that
-    link (see VisitorSession.campaign_link_id, set sticky in beacon()).
-    'signups' intersects those same anonymous_ids against anyone who has a
-    VisitorEvent(event_type='signup') -- see add_user() in
-    backend/user/routes/user.py for where that event gets written."""
+    """clicks/visitors/signups/contributions per link_id. 'visitors' is a
+    distinct count of VisitorSession.anonymous_id rows whose first-touch
+    landed on that link (see VisitorSession.campaign_link_id, set sticky in
+    beacon()). 'signups' and 'contributions' each intersect those same
+    anonymous_ids against anyone who has a matching VisitorEvent --
+    event_type='signup' is written in add_user() (backend/user/routes/
+    user.py); event_type='contribution' is written by each of the guest
+    create-listing/post/business routes (backend/estates/routes/estates.py,
+    backend/tachlis/routes/tachlis_post.py, backend/business/routes/
+    business.py) -- "did this link actually bring in a guest submission",
+    the conversion a /contribute-style link cares about, same shape as a
+    signup-driving link's conversion."""
     if not link_ids:
         return {}
 
@@ -39,17 +45,20 @@ def _stats_for_links(link_ids):
         all_anon_ids.add(s.anonymous_id)
 
     signup_anon_ids = set()
+    contribution_anon_ids = set()
     if all_anon_ids:
-        rows = (db.session.query(VisitorEvent.anonymous_id)
-                .filter(VisitorEvent.event_type == 'signup', VisitorEvent.anonymous_id.in_(all_anon_ids))
+        rows = (db.session.query(VisitorEvent.anonymous_id, VisitorEvent.event_type)
+                .filter(VisitorEvent.event_type.in_(('signup', 'contribution')), VisitorEvent.anonymous_id.in_(all_anon_ids))
                 .distinct().all())
-        signup_anon_ids = {r[0] for r in rows}
+        for anon_id, event_type in rows:
+            (signup_anon_ids if event_type == 'signup' else contribution_anon_ids).add(anon_id)
 
     return {
         link_id: {
             'clicks': clicks_by_link.get(link_id, 0),
             'visitors': len(anon_by_link.get(link_id, set())),
             'signups': len(anon_by_link.get(link_id, set()) & signup_anon_ids),
+            'contributions': len(anon_by_link.get(link_id, set()) & contribution_anon_ids),
         }
         for link_id in link_ids
     }

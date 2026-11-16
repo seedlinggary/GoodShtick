@@ -18,6 +18,7 @@ from backend.estates.schemas.estates import (
     EstatesListingCardSchema, make_listing_schema,
 )
 from backend.alerts.routes.alert import maybe_send_digests
+from backend.analytics.modals.visitor import VisitorEvent
 
 estates_api = Blueprint('estates_api', __name__, url_prefix='/estates')
 
@@ -963,6 +964,14 @@ def create_guest_listing():
             db.session.add(EstatesListingPhoto(listing_id=listing.id, filename=filename, position=i))
 
     db.session.commit()
+
+    # See backend/business/routes/business.py's create_guest_business for
+    # why this exists -- lets a campaign link's own stats count "did they
+    # actually contribute something" as its own conversion.
+    anon_id = (body.get('anon_id') or '').strip()[:64]
+    if anon_id:
+        db.session.add(VisitorEvent(anonymous_id=anon_id, event_type='contribution'))
+        db.session.commit()
 
     if guest_email:
         try:
