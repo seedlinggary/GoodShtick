@@ -134,6 +134,32 @@ def send_confirmation_email(alert, confirm_url):
     })
 
 
+def send_alert_confirmed_email(alert, unsubscribe_url):
+    """Sent once, right when a guest (no account) alert is created -- alerts
+    now auto-confirm immediately (see create_alert in routes/alert.py), so
+    this is just a receipt plus the one link they need to ever stop it, not
+    an action they have to take before it starts working. Replaces the old
+    send_confirmation_email for new alerts; that function stays only for
+    the handful of pre-existing pending alerts whose confirm link might
+    still get clicked."""
+    resend, from_header = _client()
+    site = SITE_NAMES.get(alert.search_type, 'GUT')
+    label = escape(alert.label or 'your search')
+    html = _wrap(
+        _kicker('Alert confirmed') +
+        f'<p style="margin:0;">You\'re all set -- we\'ll email you when there\'s something new for '
+        f'<strong>{label}</strong> on {site}.</p>'
+        f'<p style="margin:14px 0 0;color:{MUTED};font-size:13px;">'
+        f'Didn\'t set this up? {_footer_link(unsubscribe_url, "Unsubscribe")} and nothing more will be sent.</p>',
+        preheader=f'Your {site} alert for {alert.label or "your search"} is live',
+    )
+    resend.Emails.send({
+        'from': from_header, 'to': [alert.email],
+        'subject': f'Your {site} alert is set up',
+        'html': html,
+    })
+
+
 def send_guest_submission_email(email, content_label, title, manage_url):
     """Sent once, at guest-submission time, for any no-account post across
     the site (a job, a listing, a business, a comment, ...) -- `content_label`

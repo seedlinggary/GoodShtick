@@ -154,34 +154,37 @@ def create_alert(current_user):
     existing = Alert.query.filter_by(email=email, search_type=search_type, filters=filters).first()
     if existing:
         if not existing.confirmed:
-            # Same search, still unconfirmed -- resend rather than silently
-            # no-op, in case the first email was lost/missed.
-            try:
-                emails.send_confirmation_email(existing, f'{MAIN_SITE_URL}/alerts/confirm/{existing.confirm_token}')
-            except Exception:
-                pass
-            return jsonify({'message': 'You already have this alert pending -- check your email to confirm it.'}), 200
+            # A leftover from before alerts auto-confirmed (see below) --
+            # honor the no-extra-step policy retroactively rather than
+            # leaving it stuck in the old pending flow.
+            existing.confirmed = True
+            db.session.commit()
         return jsonify({'message': 'You already have an active alert for this exact search.'}), 200
 
     alert = Alert(
         email=email, search_type=search_type, filters=filters, label=label,
         user_id=current_user.public_id if current_user else None,
+        # Auto-confirmed either way -- no second "click to confirm" step for
+        # guests. That extra round trip meant a real share of alerts just
+        # sat in "Pending confirmation" forever (missed/spam-filtered
+        # email, or simply never got back to it), never actually sending
+        # anything. The guest's one real safeguard is now the unsubscribe
+        # link in the notice email below, not a gate before the alert can
+        # ever fire.
+        confirmed=True,
     )
-    if current_user:
-        # Already a verified account holder -- no separate email round trip
-        # needed, same reasoning create_shtick/create_post give admin/boss
-        # posters an approval bypass elsewhere in this codebase.
-        alert.confirmed = True
     db.session.add(alert)
     db.session.commit()
 
-    if not alert.confirmed:
+    if not current_user:
+        # Logged-in members can already see this in My Alerts -- this is
+        # purely the guest's receipt + their one link to stop it, not an
+        # action they need to take, so a send failure here is never worth
+        # rolling back an alert that's already active either way.
         try:
-            emails.send_confirmation_email(alert, f'{MAIN_SITE_URL}/alerts/confirm/{alert.confirm_token}')
-        except Exception as exc:
-            db.session.delete(alert)
-            db.session.commit()
-            return jsonify({'message': f'Could not send the confirmation email: {exc}'}), 502
+            emails.send_alert_confirmed_email(alert, f'{MAIN_SITE_URL}/alerts/unsubscribe/{alert.unsubscribe_token}')
+        except Exception:
+            pass
 
     return jsonify(alert_schema.dump(alert)), 201
 
