@@ -82,6 +82,18 @@ def add_user():
     db.session.add(new_user)
     db.session.commit()
     link_alerts_to_user(new_user)
+
+    # Marketing-campaign conversion marker -- anon_id is the same
+    # localStorage value VisitorTracker.js already sends on every beacon
+    # call, passed through here by SignUp.js. event_type is free text by
+    # design (see VisitorEvent's own docstring); attribution back to a
+    # specific campaign link comes from joining this anonymous_id against
+    # VisitorSession.campaign_link_id, not from anything stored here.
+    anon_id = (body.get('anon_id') or '').strip()[:64]
+    if anon_id:
+        db.session.add(VisitorEvent(anonymous_id=anon_id, event_type='signup'))
+        db.session.commit()
+
     return jsonify(user_schema.dump(new_user)), 201
 
 

@@ -11,6 +11,7 @@ from security import super_admin_required, token_optional, real_client_ip
 from backend.analytics.modals.visitor import VisitorEvent, VisitorIpThrottle, VisitorSession
 from backend.business.modals.business import Business
 from backend.business.modals.business_site import BusinessSite
+from backend.campaigns.modals.campaign import CampaignLink
 from backend.user.modals.user import User
 
 analytics_api = Blueprint('analytics_api', __name__, url_prefix='/analytics')
@@ -156,6 +157,7 @@ def beacon(current_user):
     body = request.get_json(silent=True) or {}
     anon_id = (body.get('anon_id') or '').strip()[:64] or secrets.token_urlsafe(32)
     site = (body.get('site') or '').strip()[:20] or None
+    ad_code = (body.get('ad_code') or '').strip()[:16] or None
 
     is_localhost = _looks_like_localhost()
     is_bot = _looks_like_bot_ua()
@@ -176,6 +178,13 @@ def beacon(current_user):
                 site_row = BusinessSite.query.filter_by(subdomain=subdomain).first()
                 business_id = site_row.business_id if site_row else None
 
+        # Sticky first-touch campaign attribution -- resolved here (not
+        # trusted from a client-supplied id) so a stale/tampered ad_code
+        # can never attach a session to the wrong campaign. Looked up only
+        # when the session doesn't already have one, same guard as the
+        # "if site and not session_row.site" pattern just below.
+        campaign_link = CampaignLink.query.filter_by(code=ad_code).first() if ad_code else None
+
         session_row = VisitorSession.query.filter_by(anonymous_id=anon_id).first()
         if session_row:
             session_row.last_seen = now
@@ -186,6 +195,9 @@ def beacon(current_user):
                 session_row.site = site
             if business_id and not session_row.business_id:
                 session_row.business_id = business_id
+            if campaign_link and not session_row.campaign_link_id:
+                session_row.campaign_link_id = campaign_link.id
+                session_row.campaign_id = campaign_link.campaign_id
         else:
             if not _check_and_record_new_session():
                 db.session.commit()  # persist the throttle row's own increment/insert
@@ -200,6 +212,8 @@ def beacon(current_user):
                 is_localhost=False,
                 site=site,
                 business_id=business_id,
+                campaign_link_id=campaign_link.id if campaign_link else None,
+                campaign_id=campaign_link.campaign_id if campaign_link else None,
             )
             db.session.add(session_row)
 

@@ -73,6 +73,17 @@ class VisitorSession(db.Model):
     # non-storefront session.
     business_id = db.Column(db.Integer, nullable=True, index=True)
 
+    # Which marketing campaign link (backend/campaigns/modals/campaign.py's
+    # CampaignLink) this visitor first arrived through, if any -- sticky
+    # first-touch attribution, set once in beacon() the same way `site`
+    # above is ("if site and not session_row.site"), never overwritten by a
+    # later ad_code. Loose reference (no FK), same reasoning as business_id:
+    # a beacon should never fail because of a stale/deleted link. campaign_id
+    # is denormalized alongside it purely so campaign-level stats don't need
+    # a join through CampaignLink just to filter.
+    campaign_link_id = db.Column(db.Integer, nullable=True, index=True)
+    campaign_id = db.Column(db.Integer, nullable=True, index=True)
+
     def __repr__(self):
         return f'<VisitorSession {self.anonymous_id[:8]}... user={self.user_id}>'
 
