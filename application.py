@@ -87,6 +87,7 @@ from backend.search.routes.search import search_api
 from backend.alerts.routes.alert import alerts_api, link_alerts_to_user
 from backend.news.routes.news_article import news_article_api
 from backend.news.routes.news_scraper import news_scraper_api
+from backend.news.routes.news_ticker import news_ticker_api
 from backend.askgut.routes.chat import askgut_api
 
 # Models — imported so SQLAlchemy's mapper registry can resolve string-based
@@ -231,6 +232,7 @@ application.register_blueprint(torah_zmanim_api)
 application.register_blueprint(torah_sheets_api)
 application.register_blueprint(news_article_api)
 application.register_blueprint(news_scraper_api)
+application.register_blueprint(news_ticker_api)
 application.register_blueprint(feed_api)
 application.register_blueprint(alerts_api)
 application.register_blueprint(banner_api)
