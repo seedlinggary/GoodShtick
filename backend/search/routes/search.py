@@ -24,10 +24,9 @@ comparable to each other, so a single cross-type ranking would be
 meaningless -- a grouped results page (rank only WITHIN each group) is the
 right shape for an actual multi-site search instead.
 
-Gut News (backend/news/) is deliberately left out -- it's fully built but
-still gated behind news/SuperAdminGate.js on the frontend (not launched to
-regular users yet), so it shouldn't be reachable via a public search
-either."""
+GutKol (backend/news/) is deliberately left out for now -- it launched
+after this module was written and hasn't been wired into cross-site search
+yet, not because it's gated (it's public)."""
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request

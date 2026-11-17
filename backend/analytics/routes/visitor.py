@@ -587,7 +587,7 @@ def business_site_businesses(_current_user):
 
 SITE_LABELS = {
     'main': 'Gut Shtick', 'business': 'Gut Community', 'estates': 'Gut Estates',
-    'money': 'Gut Money', 'torah': 'Gut Torah', 'news': 'Gut News',
+    'money': 'Gut Money', 'torah': 'Gut Torah', 'news': 'GutKol',
 }
 PAGE_SIZE = 50
 

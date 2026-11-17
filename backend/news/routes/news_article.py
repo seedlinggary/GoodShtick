@@ -1,18 +1,28 @@
+import os
+
 from flask import Blueprint, jsonify, request
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 
 from config import db
-from security import super_admin_required
+from security import admin_required, token_required, token_optional
 from upload import upload_file
-from backend.news.modals.news import NewsArticle, NewsArticleLike, CATEGORIES, slugify
+from backend.news.modals.news import NewsArticle, NewsArticleLike, CATEGORIES, MAX_CATEGORIES, normalize_categories, slugify
 from backend.news.schemas.news import NewsArticleCardSchema, make_article_schema
 
-# Gut News is soft-locked to super_admin only for now (every route below
-# requires it, including plain reads) -- not a permanent design, just the
-# pre-launch gate until the site is ready to open to the public. Reverting
-# means swapping @super_admin_required back to @token_optional (reads) /
-# @token_required (writes), same as the other sites.
+# GutKol's own domain (gutkol.com) -- distinct from the generic
+# FRONTEND_URL/MAIN_SITE_URL env vars the main site and other modules use,
+# since this link has to land on the HOST that actually serves news/routes.js
+# (siteMode.js resolves which site renders purely by hostname), not on
+# whatever the main consumer site's own domain happens to be.
+NEWS_SITE_URL = os.environ.get('NEWS_SITE_URL', 'https://gutkol.com')
+
+# GutKol is now open to the public (the old pre-launch soft lock -- every
+# route here required super_admin, including plain reads -- has been lifted
+# now that the site is launching for real). Reads are @token_optional
+# (public), writing a post is @token_required (any signed-in member, bot
+# accounts included), and moderating the scraped/guest queue is
+# @admin_required.
 news_article_api = Blueprint('news_article_api', __name__, url_prefix='/news')
 
 PAGE_SIZE = 24
@@ -51,36 +61,60 @@ def _public_filter(query):
     now. (Before guest posting existed, this checked `imported.is_(False)`
     as an OR-branch instead, trusting every non-scraped post by default --
     that would have let a GUEST submission's pending approved_to_publish=None
-    row through too, since imported=False is true for guest posts as well.
-    Not currently exploitable since every route in this file is still
-    @super_admin_required including reads, but fixed now rather than left
-    as a latent bug for whenever the site opens up.)"""
+    row through too, since imported=False is true for guest posts as well --
+    fixed now that reads are public, not just in theory.)"""
     return query.filter(NewsArticle.approved_to_publish.is_(True))
 
 
 @news_article_api.route('/categories', methods=['GET'])
-@super_admin_required
+@token_optional
 def list_categories(current_user):
-    return jsonify({'categories': list(CATEGORIES)})
+    """The preset list PLUS any custom category a poster has already typed
+    in (see create_article/edit_article) -- so a custom topic, once used,
+    shows up as a real filter option for everyone else too, not just a
+    one-off string only its own author can find again. `presets` is kept
+    separate so the frontend can group/label them differently from the
+    free-typed ones. Flattened in Python rather than a SQL unnest -- same
+    "fine at this app's scale" reasoning as the rest of this module's own
+    lean queries (see _public_filter's docstring)."""
+    rows = db.session.query(NewsArticle.categories).filter(NewsArticle.categories.isnot(None)).all()
+    custom = sorted({c for (cats,) in rows for c in (cats or []) if c and c not in CATEGORIES})
+    return jsonify({'categories': list(CATEGORIES) + custom, 'presets': list(CATEGORIES), 'max_categories': MAX_CATEGORIES})
 
 
 @news_article_api.route('/stats', methods=['GET'])
-@super_admin_required
+@token_optional
 def news_stats(current_user):
-    base = _public_filter(NewsArticle.query)
-    total = base.count()
-    by_category = dict(
-        db.session.query(NewsArticle.category, func.count(NewsArticle.id))
-        .filter(db.or_(NewsArticle.imported.is_(False), NewsArticle.approved_to_publish.is_(True)))
-        .group_by(NewsArticle.category).all()
-    )
+    # Reuses _public_filter (not news_stats' own hand-rolled filter) so this
+    # can't drift back out of sync with what list_articles/the feed actually
+    # shows -- the old version here checked `imported.is_(False) OR
+    # approved_to_publish.is_(True)`, the exact bug _public_filter's own
+    # docstring describes (it let a still-pending GUEST post's category
+    # count toward totals a visitor never actually sees).
+    rows = _public_filter(NewsArticle.query).with_entities(NewsArticle.categories).all()
+    total = len(rows)
+    by_category = {}
+    for (cats,) in rows:
+        for c in (cats or []):
+            by_category[c] = by_category.get(c, 0) + 1
     contributors = (db.session.query(func.count(func.distinct(NewsArticle.created_by)))
                     .filter(NewsArticle.created_by.isnot(None), NewsArticle.imported.is_(False)).scalar() or 0)
     return jsonify({'articles': total, 'contributors': contributors, 'by_category': by_category})
 
 
+@news_article_api.route('/sitemap-data', methods=['GET'])
+def sitemap_data():
+    """Minimal {slug, updated} rows for every publicly-visible article --
+    same lean-query pattern as the other sites' own sitemap_data() (see
+    torah_post.py's posts_sitemap_data for the convention this mirrors)."""
+    rows = _public_filter(db.session.query(NewsArticle.slug, NewsArticle.pub_date)).all()
+    return jsonify({
+        'articles': [{'slug': slug, 'updated': pub_date.isoformat() if pub_date else None} for slug, pub_date in rows],
+    })
+
+
 @news_article_api.route('/articles', methods=['GET'])
-@super_admin_required
+@token_optional
 def list_articles(current_user):
     category = (request.args.get('category') or '').strip().lower()
     q = (request.args.get('q') or '').strip()
@@ -93,9 +127,7 @@ def list_articles(current_user):
 
     query = _public_filter(NewsArticle.query.options(*_feed_options()))
     if category:
-        if category not in CATEGORIES:
-            return jsonify({'message': f'category must be one of: {", ".join(CATEGORIES)}'}), 400
-        query = query.filter(NewsArticle.category == category)
+        query = query.filter(NewsArticle.categories.contains([category]))
     if source == 'original':
         query = query.filter(NewsArticle.imported.is_(False))
     elif source == 'aggregated':
@@ -120,7 +152,7 @@ def list_articles(current_user):
 
 
 @news_article_api.route('/articles/<identifier>', methods=['GET'])
-@super_admin_required
+@token_optional
 def get_article(current_user, identifier):
     query = NewsArticle.query.options(*_feed_options())
     article = query.filter_by(id=int(identifier)).first() if identifier.isdigit() else query.filter_by(slug=identifier).first()
@@ -136,11 +168,17 @@ def get_article(current_user, identifier):
 
 
 @news_article_api.route('/articles', methods=['POST'])
-@super_admin_required
+@token_required
 def create_article(current_user):
     """User-submitted original post -- always imported=False, published
     immediately (see NewsArticle's docstring). Scraped articles are created
-    exclusively by news_scraper.py, never through this endpoint."""
+    exclusively by news_scraper.py, never through this endpoint.
+
+    Unlike a guest tip, excerpt/body_text/categories are all REQUIRED here --
+    the owner explicitly wants every self-authored article (including from
+    a bot account set up to auto-generate content) to always carry both a
+    short snippet/headline AND the full piece, plus at least one category
+    pick (up to MAX_CATEGORIES), never just a bare title."""
     body = request.get_json() or {}
     title = (body.get('title') or '').strip()
     if not title:
@@ -149,19 +187,23 @@ def create_article(current_user):
         return jsonify({'message': f'Title must be {TITLE_MAX} characters or fewer'}), 400
 
     excerpt = (body.get('excerpt') or '').strip()
+    if not excerpt:
+        return jsonify({'message': 'A short snippet/headline (excerpt) is required'}), 400
     if len(excerpt) > EXCERPT_MAX:
         return jsonify({'message': f'Excerpt must be {EXCERPT_MAX} characters or fewer'}), 400
     body_text = (body.get('body_text') or '').strip()
+    if not body_text:
+        return jsonify({'message': 'The full article text (body_text) is required'}), 400
     if len(body_text) > BODY_MAX:
         return jsonify({'message': f'Body must be {BODY_MAX} characters or fewer'}), 400
-    category = (body.get('category') or 'other').strip().lower()
-    if category not in CATEGORIES:
-        return jsonify({'message': f'category must be one of: {", ".join(CATEGORIES)}'}), 400
+    categories = normalize_categories(body.get('categories'))
+    if not categories:
+        return jsonify({'message': 'At least one category is required'}), 400
     source_url = (body.get('source_url') or '').strip()
 
     article = NewsArticle(
         slug=_unique_slug(title), title=title, created_by=current_user.public_id,
-        excerpt=excerpt or None, body_text=body_text or None, category=category,
+        excerpt=excerpt or None, body_text=body_text or None, categories=categories,
         image=body.get('image') or None, source_url=source_url or None,
         imported=False, approved_to_publish=True,
     )
@@ -176,16 +218,11 @@ GUEST_PHONE_MAX = 40
 
 # ── Guest (no-account) article routes ───────────────────────────────────────
 # "Post without an account" -- anyone can submit a news tip with just an
-# email or phone, no super_admin login required (the only 4 routes in this
-# entire file without @super_admin_required, by design -- a guest obviously
-# isn't a super_admin). Always lands pending (approved_to_publish=None),
+# email or phone, no login required at all (these 4 routes carry no
+# decorator, by design). Always lands pending (approved_to_publish=None),
 # unlike create_article's own logged-in posts, which still auto-publish --
-# a GUEST byline has nothing vouching for it the way a real account's does.
-# Since every OTHER route here (including plain reads) stays
-# @super_admin_required while News is still pre-launch, a guest submission
-# today only ever becomes visible to the admin reviewing it, not to any
-# public reader -- still worth building now to stockpile real content
-# ahead of launch.
+# a GUEST byline has nothing vouching for it the way a real account's does,
+# so it needs a human (@admin_required) to approve it before anyone sees it.
 @news_article_api.route('/articles/guest', methods=['POST'])
 def create_guest_article():
     body = request.get_json() or {}
@@ -201,9 +238,7 @@ def create_guest_article():
     body_text = (body.get('body_text') or '').strip()
     if len(body_text) > BODY_MAX:
         return jsonify({'message': f'Body must be {BODY_MAX} characters or fewer'}), 400
-    category = (body.get('category') or 'other').strip().lower()
-    if category not in CATEGORIES:
-        return jsonify({'message': f'category must be one of: {", ".join(CATEGORIES)}'}), 400
+    categories = normalize_categories(body.get('categories')) or ['other']
     source_url = (body.get('source_url') or '').strip()
 
     guest_email = (body.get('guest_email') or '').strip()[:GUEST_EMAIL_MAX]
@@ -218,7 +253,7 @@ def create_guest_article():
     import secrets
     article = NewsArticle(
         slug=_unique_slug(title), title=title, created_by=None,
-        excerpt=excerpt or None, body_text=body_text or None, category=category,
+        excerpt=excerpt or None, body_text=body_text or None, categories=categories,
         image=body.get('image') or None, source_url=source_url or None,
         imported=False, approved_to_publish=None,
         guest_email=guest_email or None, guest_phone=guest_phone or None,
@@ -230,11 +265,9 @@ def create_guest_article():
     if guest_email:
         try:
             from backend.alerts import emails
-            import os as _os
-            site_url = _os.environ.get('FRONTEND_URL', 'https://www.goodshtick.com')
             emails.send_guest_submission_email(
                 guest_email, 'your news submission', article.title,
-                f'{site_url}/guest/news/{article.guest_manage_token}',
+                f'{NEWS_SITE_URL}/guest/news/{article.guest_manage_token}',
             )
         except Exception:
             pass  # an email failure should never break the actual submission
@@ -276,11 +309,8 @@ def edit_guest_article(token):
         if len(text) > BODY_MAX:
             return jsonify({'message': f'Body must be {BODY_MAX} characters or fewer'}), 400
         article.body_text = text or None
-    if 'category' in body:
-        category = (body.get('category') or 'other').strip().lower()
-        if category not in CATEGORIES:
-            return jsonify({'message': f'category must be one of: {", ".join(CATEGORIES)}'}), 400
-        article.category = category
+    if 'categories' in body:
+        article.categories = normalize_categories(body.get('categories')) or ['other']
     if 'image' in body:
         article.image = body.get('image') or None
 
@@ -299,7 +329,7 @@ def delete_guest_article(token):
 
 
 @news_article_api.route('/articles/<int:article_id>', methods=['PATCH'])
-@super_admin_required
+@token_required
 def edit_article(current_user, article_id):
     article = db.session.get(NewsArticle, article_id)
     if not article:
@@ -315,21 +345,28 @@ def edit_article(current_user, article_id):
         if len(title) > TITLE_MAX:
             return jsonify({'message': f'Title must be {TITLE_MAX} characters or fewer'}), 400
         article.title = title
+    # Only enforced as non-empty for a self-authored post (never imported) --
+    # a scraped article legitimately has no body_text (see NewsArticle's
+    # docstring) and this same PATCH route is also how an admin edits those.
     if 'excerpt' in body:
         excerpt = (body.get('excerpt') or '').strip()
+        if not article.imported and not excerpt:
+            return jsonify({'message': 'A short snippet/headline (excerpt) is required'}), 400
         if len(excerpt) > EXCERPT_MAX:
             return jsonify({'message': f'Excerpt must be {EXCERPT_MAX} characters or fewer'}), 400
         article.excerpt = excerpt or None
     if 'body_text' in body:
         text = (body.get('body_text') or '').strip()
+        if not article.imported and not text:
+            return jsonify({'message': 'The full article text (body_text) is required'}), 400
         if len(text) > BODY_MAX:
             return jsonify({'message': f'Body must be {BODY_MAX} characters or fewer'}), 400
         article.body_text = text or None
-    if 'category' in body:
-        category = (body.get('category') or 'other').strip().lower()
-        if category not in CATEGORIES:
-            return jsonify({'message': f'category must be one of: {", ".join(CATEGORIES)}'}), 400
-        article.category = category
+    if 'categories' in body:
+        categories = normalize_categories(body.get('categories'))
+        if not categories:
+            return jsonify({'message': 'At least one category is required'}), 400
+        article.categories = categories
     if 'image' in body:
         article.image = body.get('image') or None
 
@@ -338,7 +375,7 @@ def edit_article(current_user, article_id):
 
 
 @news_article_api.route('/articles/<int:article_id>', methods=['DELETE'])
-@super_admin_required
+@token_required
 def delete_article(current_user, article_id):
     article = db.session.get(NewsArticle, article_id)
     if not article:
@@ -351,7 +388,7 @@ def delete_article(current_user, article_id):
 
 
 @news_article_api.route('/articles/<int:article_id>/like', methods=['POST'])
-@super_admin_required
+@token_required
 def like_article(current_user, article_id):
     article = db.session.get(NewsArticle, article_id)
     if not article:
@@ -364,7 +401,7 @@ def like_article(current_user, article_id):
 
 
 @news_article_api.route('/articles/<int:article_id>/like', methods=['DELETE'])
-@super_admin_required
+@token_required
 def unlike_article(current_user, article_id):
     like = NewsArticleLike.query.filter_by(article_id=article_id, user_id=current_user.public_id).first()
     if like:
@@ -374,7 +411,7 @@ def unlike_article(current_user, article_id):
 
 
 @news_article_api.route('/my/articles', methods=['GET'])
-@super_admin_required
+@token_required
 def my_articles(current_user):
     rows = (NewsArticle.query.options(*_feed_options())
             .filter_by(created_by=current_user.public_id, imported=False)
@@ -383,7 +420,7 @@ def my_articles(current_user):
 
 
 @news_article_api.route('/upload', methods=['POST'])
-@super_admin_required
+@token_required
 def news_upload(_current_user):
     filename = upload_file(request)
     if not filename:
@@ -394,7 +431,7 @@ def news_upload(_current_user):
 # ── Moderation (scraped-article approval queue) ────────────────────────────
 
 @news_article_api.route('/admin/pending', methods=['GET'])
-@super_admin_required
+@admin_required
 def list_pending(current_user):
     """Scraped articles (imported=True) AND guest submissions (imported=
     False, created_by=None) both land here now -- this used to require
@@ -409,7 +446,7 @@ def list_pending(current_user):
 
 
 @news_article_api.route('/admin/articles/<int:article_id>/approve', methods=['POST'])
-@super_admin_required
+@admin_required
 def approve_article(current_user, article_id):
     article = db.session.get(NewsArticle, article_id)
     if not article:
@@ -420,7 +457,7 @@ def approve_article(current_user, article_id):
 
 
 @news_article_api.route('/admin/articles/<int:article_id>/reject', methods=['POST'])
-@super_admin_required
+@admin_required
 def reject_article(current_user, article_id):
     article = db.session.get(NewsArticle, article_id)
     if not article:

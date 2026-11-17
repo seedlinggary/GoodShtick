@@ -1,4 +1,4 @@
-"""Gut News's own scraper -- same approach as content_pipeline/routes/
+"""GutKol's own scraper -- same approach as content_pipeline/routes/
 scraper.py (which feeds Shtick on the main site with Jewish/Israel-interest
 sources), reusing its generic, source-agnostic RSS/image helpers directly
 rather than re-implementing them, but creating NewsArticle rows instead of
@@ -35,12 +35,12 @@ SOURCES = {
     'npr': {
         'feed': 'https://feeds.npr.org/1001/rss.xml',
         'credit': 'NPR',
-        'category': 'world',
+        'category': 'american',
     },
     'bbc': {
         'feed': 'https://feeds.bbci.co.uk/news/world/rss.xml',
         'credit': 'BBC News',
-        'category': 'world',
+        'category': 'international',
     },
 }
 
@@ -100,7 +100,7 @@ def run_scraper(current_user, source):
                 excerpt = (art.get('summary') or '')[:EXCERPT_MAX]
                 article = NewsArticle(
                     slug=_unique_slug(art['title']), title=art['title'][:200],
-                    excerpt=excerpt or None, category=cfg['category'],
+                    excerpt=excerpt or None, categories=[cfg['category']],
                     source_url=link, source_name=cfg['credit'],
                     imported=True, approved_to_publish=None,
                 )

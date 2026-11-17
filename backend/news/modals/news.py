@@ -2,15 +2,57 @@ import re
 import unicodedata
 from datetime import datetime
 
+from sqlalchemy.dialects.postgresql import ARRAY
+
 from config import db
 
-CATEGORIES = ('world', 'politics', 'business', 'science', 'health', 'sports', 'entertainment', 'other')
+# The owner's own preset split for GutKol's articles (bot-generated content
+# included), plus a catch-all 'other' for anything that doesn't cleanly fit
+# one of these. NOT an exhaustive enum -- a poster who can't find a fit can
+# type their own category instead (see news_article.py's create_article/
+# edit_article, which accept any normalized custom string too), so the
+# `categories` column is NOT constrained to this tuple at the DB level. This
+# list is just what's offered as ready-made choices before "add your own."
+CATEGORIES = ('finance', 'political', 'american', 'international', 'technology', 'health', 'other')
+
+CATEGORY_MAX_LEN = 40
+
+# An article can carry more than one topic (e.g. a story that's both
+# "finance" and "political"), but not an unbounded tag list -- the owner's
+# own cap, enforced centrally in normalize_categories() below so every
+# create/edit route gets it for free rather than re-checking it themselves.
+MAX_CATEGORIES = 3
 
 
 def slugify(name):
     normalized = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
     slug = re.sub(r'[^a-z0-9]+', '-', normalized.lower()).strip('-')
     return slug or 'article'
+
+
+def normalize_category(raw):
+    """Lowercases/trims a single category (preset or custom-typed) so the
+    same topic always lands as the same string -- matters once a poster can
+    type their own instead of picking from CATEGORIES, since "Pop Culture"
+    and "pop culture" need to be the same filter, not two. Collapses
+    internal whitespace too, and truncates to the column's own max length."""
+    cleaned = re.sub(r'\s+', ' ', (raw or '').strip().lower())
+    return cleaned[:CATEGORY_MAX_LEN]
+
+
+def normalize_categories(raw_list):
+    """Same normalization as normalize_category(), applied to a whole list
+    -- dedupes (preserving the order picked) and caps at MAX_CATEGORIES, so
+    a request can't bypass the limit by just sending a longer list. Returns
+    [] for anything falsy/not iterable, never raises on a malformed body."""
+    cleaned = []
+    for raw in (raw_list or []):
+        c = normalize_category(raw)
+        if c and c not in cleaned:
+            cleaned.append(c)
+        if len(cleaned) >= MAX_CATEGORIES:
+            break
+    return cleaned
 
 
 class NewsArticle(db.Model):
@@ -33,7 +75,12 @@ class NewsArticle(db.Model):
     excerpt = db.Column(db.Text, nullable=True)
     body_text = db.Column(db.Text, nullable=True)
     image = db.Column(db.String(300), nullable=True)
-    category = db.Column(db.String(20), nullable=False, default='other', server_default='other', index=True)
+    # A Postgres array, not a join table -- at this app's traffic scale
+    # (see _public_filter's own note on the rest of this file) a plain
+    # array column with the `@>`-style containment filter list_articles
+    # uses is simpler than a many-to-many table for a 1-3 element tag list,
+    # and GIN-indexable if it ever needs to be.
+    categories = db.Column(ARRAY(db.String(CATEGORY_MAX_LEN)), nullable=False, default=list, server_default='{}')
 
     imported = db.Column(db.Boolean, default=False, server_default='false', nullable=False, index=True)
     source_url = db.Column(db.String(500), nullable=True)
