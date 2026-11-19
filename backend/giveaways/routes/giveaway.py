@@ -9,7 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from config import db
-from security import super_admin_required, token_optional, real_client_ip
+from security import super_admin_required, token_required, token_optional, real_client_ip
 from backend.giveaways.modals.giveaway import (
     GiveawayCampaign, GiveawayEntryAction, GiveawayParticipant, GiveawayParticipation,
     GiveawayEntry, GiveawayReferralClick, GiveawayDrawSnapshot, GiveawayDraw,
@@ -255,6 +255,18 @@ def create_campaign(current_user):
         created_by=current_user.public_id,
     )
     db.session.add(campaign)
+    db.session.flush()
+
+    # Every campaign needs at least one enabled entry action before it can
+    # go active (see update_campaign below) -- ship with the one that's
+    # already free: 'email_signup' is auto-awarded the moment someone
+    # submits the entry form (see enter_giveaway), so this needs no extra
+    # admin setup and lets a brand-new campaign activate immediately.
+    db.session.add(GiveawayEntryAction(
+        campaign_id=campaign.id, action_key='email_signup', label='Enter with your name and email',
+        description='Just fill out the entry form above.', entry_quantity=1,
+        is_required=False, verification_method='auto', is_enabled=True, sort_order=0,
+    ))
     db.session.commit()
     return jsonify(make_campaign_schema().dump(campaign)), 201
 
@@ -847,6 +859,8 @@ def public_campaign(slug):
     if not campaign or campaign.status == 'draft':
         return jsonify({'message': 'This giveaway could not be found'}), 404
     actions = [a for a in campaign.entry_actions if a.is_enabled]
+    rules = campaign.entry_rules or {}
+    show_count = rules.get('show_participant_count', True)
     return jsonify({
         'name': campaign.name, 'slug': campaign.slug, 'description': campaign.description,
         'status': campaign.status,
@@ -854,7 +868,9 @@ def public_campaign(slug):
         'ends_at': campaign.ends_at.isoformat() if campaign.ends_at else None,
         'prize_details': campaign.prize_details, 'terms_text': campaign.terms_text,
         'privacy_note': campaign.privacy_note, 'image_url': campaign.image_url,
-        'participants_count': GiveawayParticipation.query.filter_by(campaign_id=campaign.id).count(),
+        'participants_count': (GiveawayParticipation.query.filter_by(campaign_id=campaign.id).count()
+                                if show_count else None),
+        'ask_marketing_consent': rules.get('ask_marketing_consent', True),
         'entry_actions': make_entry_action_schema(many=True).dump(actions),
     })
 
@@ -1053,10 +1069,11 @@ def verify_participation(token):
         if campaign and participation.participant:
             referral_url = f'{MAIN_SITE_URL}/campaign/{campaign.slug}?ref={participation.referral_code}'
             unsubscribe_url = f"{request.host_url.rstrip('/')}/giveaways/public/unsubscribe/{participation.verify_token}"
+            my_giveaways_url = f'{MAIN_SITE_URL}/profile?tab=giveaways'
             try:
                 send_giveaway_confirmed_email(
                     participation.participant.email, campaign.name, _entry_total(participation.id),
-                    referral_url, unsubscribe_url)
+                    referral_url, unsubscribe_url, my_giveaways_url)
             except Exception:
                 pass
 
@@ -1145,3 +1162,58 @@ def unsubscribe(token):
     participation.consent_marketing = False
     db.session.commit()
     return jsonify({'message': 'You have been unsubscribed from marketing emails for this giveaway.'})
+
+
+# ── logged-in participant: "my giveaways" referral dashboard ────────────
+# Matched by email, not GiveawayParticipant.user_id -- user_id only gets
+# backfilled when someone was already logged in at the moment they
+# entered (see enter_giveaway), so a guest entry made before they ever
+# created a Gut Shtick account would otherwise never link up. The
+# confirmation email tells people to log in with the SAME email they
+# entered with, which this matches on directly.
+@giveaway_api.route('/my', methods=['GET'])
+@token_required
+def my_giveaways(current_user):
+    email = GiveawayParticipant.normalize_email(current_user.email)
+    participant = GiveawayParticipant.query.filter_by(email=email).first()
+    if not participant:
+        return jsonify({'participations': []})
+
+    participations = (GiveawayParticipation.query.filter_by(participant_id=participant.id)
+                       .order_by(GiveawayParticipation.created_at.desc()).all())
+    if not participations:
+        return jsonify({'participations': []})
+
+    participation_ids = [p.id for p in participations]
+    campaigns = {c.id: c for c in GiveawayCampaign.query.filter(
+        GiveawayCampaign.id.in_({p.campaign_id for p in participations})).all()}
+    totals = _entry_totals(participation_ids)
+
+    referred = (GiveawayParticipation.query
+                .filter(GiveawayParticipation.referrer_participation_id.in_(participation_ids))
+                .order_by(GiveawayParticipation.created_at.desc()).all())
+    referred_by = defaultdict(list)
+    for r in referred:
+        referred_by[r.referrer_participation_id].append(r)
+
+    result = []
+    for p in participations:
+        campaign = campaigns.get(p.campaign_id)
+        if not campaign:
+            continue
+        result.append({
+            'campaign_name': campaign.name, 'campaign_slug': campaign.slug,
+            'campaign_status': campaign.status, 'status': p.status,
+            'verified': p.verified_at is not None, 'entry_total': totals.get(p.id, 0),
+            'referral_code': p.referral_code,
+            'referral_url': f'{MAIN_SITE_URL}/campaign/{campaign.slug}?ref={p.referral_code}',
+            'referral_clicks': len(p.referral_clicks),
+            # Name only, not email -- a referrer shouldn't get a friend's
+            # contact info just for clicking their own link.
+            'referred_signups': [
+                {'name': (r.participant.name if r.participant else None) or 'Someone',
+                 'verified': r.verified_at is not None, 'created_at': r.created_at.isoformat()}
+                for r in referred_by.get(p.id, [])
+            ],
+        })
+    return jsonify({'participations': result})

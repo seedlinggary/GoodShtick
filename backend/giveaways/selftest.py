@@ -55,7 +55,7 @@ from backend.user.modals.user import User
 from backend.user.modals.audit_log import AuditLog
 from backend.giveaways.modals.giveaway import (
     GiveawayCampaign, GiveawayEntryAction, GiveawayParticipant, GiveawayParticipation,
-    GiveawayEntry, GiveawayDrawSnapshot, GiveawayDraw,
+    GiveawayEntry, GiveawayDrawSnapshot, GiveawayDraw, GiveawayEntryThrottle,
 )
 from backend.giveaways.routes import giveaway as routes
 from backend.campaigns.modals.campaign import MarketingCampaign
@@ -94,6 +94,14 @@ def _cleanup():
     if marketing_ids:
         MarketingCampaign.query.filter(MarketingCampaign.id.in_(marketing_ids)).delete(synchronize_session=False)
     GiveawayParticipant.query.filter(GiveawayParticipant.email.like(f'%{SELFTEST_TAG}%')).delete(synchronize_session=False)
+
+    # test_request_context never sets X-Forwarded-For, so real_client_ip()
+    # falls back to the 'unknown' sentinel for every call this script
+    # makes -- a real request never produces that identity (Vercel always
+    # sets X-Forwarded-For), so this bucket is purely a test-harness
+    # artifact. Reset it each run, or repeated runs on the same day would
+    # eventually trip GIVEAWAY_ENTRY_DAILY_CAP against themselves.
+    GiveawayEntryThrottle.query.filter_by(identity='ip:unknown').delete(synchronize_session=False)
 
     test_user_ids = [u.public_id for u in User.query.filter(User.email.like(f'%{SELFTEST_TAG}%')).all()]
     if test_user_ids:
@@ -134,10 +142,15 @@ def run():
                 campaign_data = _json(routes.create_campaign.__wrapped__(fake_admin))
             campaign_id = campaign_data['id']
 
-            with application.test_request_context(f'/giveaways/{campaign_id}/entry-actions', method='POST', json={
-                'action_key': 'email_signup', 'label': 'Sign up', 'entry_quantity': 1, 'verification_method': 'auto',
-            }):
-                routes.create_entry_action.__wrapped__(fake_admin, campaign_id)
+            default_action = GiveawayEntryAction.query.filter_by(campaign_id=campaign_id, action_key='email_signup').first()
+            check('a new campaign is created with one enabled default entry action (no admin setup needed)',
+                  default_action is not None and default_action.is_enabled)
+
+            with application.test_request_context(f'/giveaways/{campaign_id}', method='PATCH', json={'status': 'active'}):
+                activate_result = _json(routes.update_campaign.__wrapped__(fake_admin, campaign_id))
+            check('a brand-new campaign can go active immediately, with no entry actions added by hand',
+                  activate_result.get('status') == 'active')
+
             with application.test_request_context(f'/giveaways/{campaign_id}/entry-actions', method='POST', json={
                 'action_key': 'referral_qualified', 'label': 'Referred a friend', 'entry_quantity': 5, 'verification_method': 'auto',
             }):
@@ -188,6 +201,29 @@ def run():
             check('the referral-credit entry is tied to B specifically (related_participation_id)',
                   bool(credit_rows) and credit_rows[0].related_participation_id == participation_b.id)
 
+            # ── Test: /my -- a logged-in site member's referral dashboard,
+            # matched purely by email (not by a user_id backfilled at entry
+            # time, which a guest entry would never have gotten). ──
+            member_user = User(
+                public_id=str(uuid.uuid4()), first_name='A', last_name='Member',
+                password=generate_password_hash('not-a-real-login', method='pbkdf2:sha256'),
+                email=email_a, profile_name=f'{SELFTEST_TAG}-member',
+            )
+            db.session.add(member_user)
+            db.session.commit()
+
+            with application.test_request_context('/giveaways/my'):
+                my_data = _json(routes.my_giveaways.__wrapped__(member_user))
+            my_campaign = next((p for p in my_data['participations'] if p['campaign_slug'] == slug), None)
+            check('/my finds a participation for a user whose login email matches the giveaway entry email',
+                  my_campaign is not None)
+            check('/my reports the live entry total, matching _entry_total directly',
+                  bool(my_campaign) and my_campaign['entry_total'] == routes._entry_total(participation_a.id))
+            check('/my lists B by name as a referred signup under A',
+                  bool(my_campaign) and any(r['name'] == 'B' for r in my_campaign['referred_signups']))
+            check('/my never exposes the referred friend\'s email address',
+                  bool(my_campaign) and not any('email' in r for r in my_campaign['referred_signups']))
+
             # ── Test 3: draw-snapshot immutability ──
             with application.test_request_context(f'/giveaways/{campaign_id}/draw/freeze', method='POST', json={}):
                 snapshot_data = _json(routes.freeze_draw.__wrapped__(fake_admin, campaign_id))
@@ -219,10 +255,7 @@ def run():
             with application.test_request_context('/giveaways', method='POST', json={'name': 'Selftest Campaign 2', 'slug': slug2}):
                 campaign2_data = _json(routes.create_campaign.__wrapped__(fake_admin))
             campaign2_id = campaign2_data['id']
-            with application.test_request_context(f'/giveaways/{campaign2_id}/entry-actions', method='POST', json={
-                'action_key': 'email_signup', 'label': 'Sign up', 'entry_quantity': 1, 'verification_method': 'auto',
-            }):
-                routes.create_entry_action.__wrapped__(fake_admin, campaign2_id)
+            # (campaign2 already has its default 'email_signup' action from create_campaign)
             with application.test_request_context(f'/giveaways/{campaign2_id}/entry-actions', method='POST', json={
                 'action_key': 'upload_proof', 'label': 'Upload proof', 'entry_quantity': 10,
                 'verification_method': 'manual', 'is_required': True,
