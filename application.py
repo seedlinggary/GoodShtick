@@ -26,6 +26,11 @@ from backend.tachlis.routes.tachlis_post import tachlis_api
 from backend.analytics.routes.visitor import analytics_api
 from backend.campaigns.modals.campaign import MarketingCampaign, CampaignLink, CampaignLinkClick
 from backend.campaigns.routes.campaign import campaign_api
+from backend.giveaways.modals.giveaway import (
+    GiveawayCampaign, GiveawayEntryAction, GiveawayParticipant, GiveawayParticipation,
+    GiveawayEntry, GiveawayReferralClick, GiveawayDrawSnapshot, GiveawayDraw, GiveawayEntryThrottle,
+)
+from backend.giveaways.routes.giveaway import giveaway_api
 from backend.user.routes.sso import sso_api
 from backend.business.routes.business import business_api
 from backend.business.routes.business_post import business_post_api
@@ -239,6 +244,7 @@ application.register_blueprint(banner_api)
 application.register_blueprint(search_api)
 application.register_blueprint(askgut_api)
 application.register_blueprint(campaign_api)
+application.register_blueprint(giveaway_api)
 
 # Schema is managed exclusively by Alembic migrations (flask db upgrade).
 # db.create_all() must NOT run here: on serverless it fires on every cold
