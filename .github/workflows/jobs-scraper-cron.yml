@@ -1,0 +1,31 @@
+name: Jobs Scraper Cron
+
+# Pulls new job listings into Gut Money's Tachlis job board once a day
+# (Arbeitnow, Remote OK, Jobicy, AllJobs.co.il -- see
+# backend/tachlis/routes/job_scraper.py). Same free-daily-automation shape
+# as alert-digest-cron.yml: Vercel Cron Jobs (vercel.json) are rejected here
+# for the same reason that file explains -- Hobby plan caps a cron at one
+# loosely-timed invocation per day with no live reschedule, which is fine
+# for "once daily" specifically, but a GitHub Actions schedule is free,
+# already set up for this exact secret, and lets a run be kicked off
+# manually (workflow_dispatch) without waiting for the next scheduled tick.
+#
+# Reuses the same two repo secrets alert-digest-cron.yml already needs
+# (Settings -> Secrets and variables -> Actions):
+#   BACKEND_URL   the deployed backend's base URL, no trailing slash
+#   CRON_SECRET   must match the backend's own CRON_SECRET env var
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # once daily, ~6am Israel winter time
+  workflow_dispatch: {}
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /tachlis/scrape/cron/run-all
+        run: |
+          curl -sf -X POST "${{ secrets.BACKEND_URL }}/tachlis/scrape/cron/run-all" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            -w "\nHTTP %{http_code}\n"

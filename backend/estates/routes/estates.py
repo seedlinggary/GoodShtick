@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime
 
+import requests
 from flask import Blueprint, jsonify, request
 from sqlalchemy import func, case
 from sqlalchemy.orm import selectinload
@@ -37,6 +38,83 @@ CONTACT_LINK_MAX = 500
 
 def _feed_options():
     return [selectinload(EstatesListing.photos), selectinload(EstatesListing.likes)]
+
+
+PHOTON_URL = 'https://photon.komoot.io/api/'
+# Photon returns 403 to Python's default User-Agent -- same fix as
+# backend/tachlis/routes/tachlis_post.py's/backend/marketplace/routes/
+# marketplace.py's own copies of this helper (duplicated rather than
+# imported across these independent modules, matching that existing
+# convention).
+PHOTON_HEADERS = {'User-Agent': f'GutShtick-Backend/1.0 ({ESTATES_SITE_URL})'}
+
+# Photon's free-text search tokenizes across every field (street/suburb/city/
+# country), so a short, generic neighborhood name can out-and-out match an
+# unrelated place on the other side of the world purely on token overlap --
+# confirmed live: "Machal, Israel" top-matched a neighbourhood literally
+# named "Israel" inside Machala, Ecuador. `countrycode` is in every Photon
+# result and isn't localized (unlike `country`, e.g. "ישראל"), so it's
+# cheap to verify the match actually landed in the country we asked for.
+# "Israel" accepts both IL and PS: OSM/Photon tags Judea & Samaria
+# communities (Beitar Illit, Modi'in Illit, etc.) under the Palestinian
+# Territories country code -- same real-world place this project already
+# treats as plain Israel everywhere else (see BusinessMap.js's
+# sanitizeMapStyle, which strips the "disputed"/Palestine boundary and
+# label layers for exactly this reason).
+_COUNTRY_CODES = {'israel': {'IL', 'PS'}}
+
+
+def _geocode(location_text, expected_country=None):
+    """Best-effort geocoding via Photon (free, no API key). Returns (lat,
+    lng) or (None, None) on no match, a wrong-country match, or any failure
+    -- never raises, since a listing's creation must never be blocked by a
+    flaky third-party geocoder."""
+    if not location_text:
+        return None, None
+    try:
+        res = requests.get(PHOTON_URL, params={'q': location_text, 'limit': 1},
+                            headers=PHOTON_HEADERS, timeout=5)
+        res.raise_for_status()
+        features = res.json().get('features') or []
+        if not features:
+            return None, None
+        top = features[0]
+        expected_codes = _COUNTRY_CODES.get((expected_country or '').strip().lower())
+        if expected_codes and top['properties'].get('countrycode') not in expected_codes:
+            return None, None
+        lng, lat = top['geometry']['coordinates']
+        return lat, lng
+    except Exception:
+        return None, None
+
+
+def _geocode_community(neighborhood, city, country):
+    """Fallback geocoding for a listing that didn't arrive with lat/lng (the
+    form's own lat/lng fields are optional, and some creation paths -- e.g.
+    bulk imports -- never set them at all). Deliberately geocodes just the
+    neighborhood/city/country, never the street address, even when one is
+    on hand: a listing placed this way should read as "somewhere in this
+    community", not as a precise pin on a specific property it was never
+    actually geocoded from. Falls back to city+country alone when the more
+    specific neighborhood+city+country query has no match -- a local
+    neighborhood name (e.g. a specific RBS sub-section) is often too
+    hyper-local for Photon's data to resolve on its own, even though the
+    city it's in resolves fine. Defaults a missing country to Israel --
+    every Gut Estates listing today is one of Israel or None (confirmed
+    live against the real data), and leaving it blank is actively
+    dangerous rather than just imprecise: a bare city name can collide
+    with a same-named, unrelated place elsewhere (e.g. "Jerusalem" alone
+    matched a hamlet in upstate New York before this default was added)."""
+    if not country:
+        country = 'Israel'
+    query = ', '.join(p for p in (neighborhood, city, country) if p)
+    if not query:
+        return None, None
+    lat, lng = _geocode(query, expected_country=country)
+    if lat is None and neighborhood and city:
+        fallback_query = ', '.join(p for p in (city, country) if p)
+        lat, lng = _geocode(fallback_query, expected_country=country)
+    return lat, lng
 
 
 SQFT_TO_SQM = 0.092903
@@ -237,6 +315,22 @@ def _validate_listing_body(body, partial=False, existing=None):
                 return jsonify({'message': 'source_posted_at must be an ISO 8601 datetime'}), None
         else:
             fields['source_posted_at'] = None
+
+    # Fallback geocoding: only when the caller didn't supply lat/lng itself
+    # (ListingForm's own lat/lng fields are optional, and some creation
+    # paths -- bulk imports in particular -- never set them at all) and,
+    # for a PATCH, only when the location actually changed -- same
+    # "don't re-geocode on every unrelated edit" rule as tachlis_post.py's
+    # edit_post. A create (partial=False) always attempts it once, same as
+    # tachlis_post.py's create_post.
+    if 'lat' not in fields and 'lng' not in fields:
+        neighborhood = fields.get('neighborhood', existing.neighborhood if existing else None)
+        city = fields.get('city', existing.city if existing else None)
+        country = fields.get('country', existing.country if existing else None)
+        location_changed = any(k in fields for k in ('neighborhood', 'city', 'country'))
+        already_placed = existing and existing.lat is not None and existing.lng is not None
+        if (not partial or location_changed) and not already_placed and (neighborhood or city):
+            fields['lat'], fields['lng'] = _geocode_community(neighborhood, city, country)
 
     return None, fields
 

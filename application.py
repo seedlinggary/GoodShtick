@@ -23,6 +23,7 @@ from backend.content_pipeline.routes.scraper import scraper_api
 from backend.content_pipeline.routes.youtube import youtube_api
 from backend.contact.routes.contact import contact_api
 from backend.tachlis.routes.tachlis_post import tachlis_api
+from backend.tachlis.routes.job_scraper import job_scraper_api
 from backend.analytics.routes.visitor import analytics_api
 from backend.campaigns.modals.campaign import MarketingCampaign, CampaignLink, CampaignLinkClick
 from backend.campaigns.routes.campaign import campaign_api
@@ -179,6 +180,7 @@ application.register_blueprint(scraper_api)
 application.register_blueprint(youtube_api)
 application.register_blueprint(contact_api)
 application.register_blueprint(tachlis_api)
+application.register_blueprint(job_scraper_api)
 application.register_blueprint(analytics_api)
 application.register_blueprint(sso_api)
 application.register_blueprint(business_api)

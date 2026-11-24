@@ -22,6 +22,7 @@ from backend.giveaways.emails import (
 from backend.campaigns.modals.campaign import MarketingCampaign
 from backend.user.modals.audit_log import log_admin_action
 from backend.business.routes.nonprofit_import_helpers import csv_response
+from backend.analytics.modals.visitor import VisitorEvent
 
 giveaway_api = Blueprint('giveaway_api', __name__, url_prefix='/giveaways')
 
@@ -104,9 +105,37 @@ def _entry_totals(participation_ids):
     return {pid: int(total) for pid, total in rows}
 
 
+def _page_view_counts(campaign_ids):
+    """Raw landing-page traffic, from the SAME generic page-view beacon
+    every other page on the site already fires (src/analytics/
+    VisitorTracker.js -> VisitorEvent, event_type='page_view') -- not a
+    new tracking mechanism, just reading data that was already being
+    collected for /campaign/<slug> and had nowhere to surface. Counts
+    every view (including someone who never entered), separately from
+    GiveawayReferralClick (which only ever fires for a ?ref= link) and
+    from GiveawayParticipation (which only exists for people who actually
+    entered) -- this is the one number that answers "how many people even
+    looked at the page.\" """
+    if not campaign_ids:
+        return {}
+    campaigns = GiveawayCampaign.query.filter(GiveawayCampaign.id.in_(campaign_ids)).all()
+    slug_by_path = {f'/campaign/{c.slug}': c.id for c in campaigns}
+    if not slug_by_path:
+        return {}
+    rows = (db.session.query(VisitorEvent.path, func.count(VisitorEvent.id),
+                              func.count(func.distinct(VisitorEvent.anonymous_id)))
+            .filter(VisitorEvent.path.in_(slug_by_path.keys()), VisitorEvent.event_type == 'page_view')
+            .group_by(VisitorEvent.path).all())
+    return {
+        slug_by_path[path]: {'page_views': views, 'unique_visitors': uniques}
+        for path, views, uniques in rows
+    }
+
+
 def _stats_for_campaigns(campaign_ids):
     if not campaign_ids:
         return {}
+    page_view_stats = _page_view_counts(campaign_ids)
     participations = GiveawayParticipation.query.filter(GiveawayParticipation.campaign_id.in_(campaign_ids)).all()
     by_campaign = defaultdict(list)
     for p in participations:
@@ -133,6 +162,7 @@ def _stats_for_campaigns(campaign_ids):
         participants = len(plist)
         verified = sum(1 for p in plist if p.verified_at)
         entries = sum(totals.get(p.id, 0) for p in plist)
+        page_views = page_view_stats.get(cid, {})
         stats[cid] = {
             'participants': participants,
             'verified': verified,
@@ -140,6 +170,8 @@ def _stats_for_campaigns(campaign_ids):
             'referral_clicks': click_counts.get(cid, 0),
             'qualified_referrals': qualified_counts.get(cid, 0),
             'conversion_rate': round(verified / participants * 100, 1) if participants else 0,
+            'page_views': page_views.get('page_views', 0),
+            'unique_visitors': page_views.get('unique_visitors', 0),
         }
     return stats
 
